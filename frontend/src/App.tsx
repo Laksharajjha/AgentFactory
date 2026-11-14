@@ -1,5 +1,9 @@
 import React from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { AuthModal } from './components/enterprise/AuthModal';
+import { CommandPalette } from './components/enterprise/CommandPalette';
+import { OfficeActivityStrip } from './components/enterprise/OfficeActivityStrip';
+import { PlatformWorkspaceViews } from './components/enterprise/PlatformWorkspaceViews';
 import { BottomControlBar } from './components/layout/BottomControlBar';
 import { LeftSidebar } from './components/layout/LeftSidebar';
 import { RightInspector } from './components/layout/RightInspector';
@@ -10,6 +14,7 @@ import { useWorldEvents } from './hooks/useWorldEvents';
 import { MeetingRoom } from './meetings/MeetingRoom';
 import { PresentationViewer } from './meetings/PresentationViewer';
 import { useEventStore } from './state/eventStore';
+import { useWorldStore } from './state/worldStore';
 import { ExpandedScreenModal } from './world/ExpandedScreenModal';
 import { WorldScene } from './world/WorldScene';
 import { useAmbientOffice } from './world/ambientScheduler';
@@ -20,21 +25,25 @@ export const App: React.FC = () => {
 
   const errorBanner = useEventStore((s) => s.errorBanner);
   const setErrorBanner = useEventStore((s) => s.setErrorBanner);
+  const activeAppSection = useWorldStore((s) => s.activeAppSection);
   const { expandedPresentation, setExpandedPresentation } = useMeeting();
 
   return (
-    <div className="flex flex-col w-screen h-screen bg-[#0b0e14] text-slate-100 overflow-hidden">
+    <div className="flex flex-col w-screen h-screen bg-[#101216] text-[#E8EBF0] overflow-hidden">
       <TopBar />
 
+      {/* Compact Real-Time Office Activity Strip (visible in 3D Office view) */}
+      {activeAppSection === 'office' && <OfficeActivityStrip />}
+
       {errorBanner && (
-        <div className="bg-red-950/90 border-b border-red-800 px-4 py-1.5 text-xs text-red-200 flex items-center justify-between z-40">
+        <div className="bg-[#C45D62]/20 border-b border-[#C45D62]/60 px-4 py-1.5 text-xs text-[#E8EBF0] flex items-center justify-between z-40">
           <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <AlertTriangle className="w-4 h-4 text-[#C45D62] shrink-0" />
             <span>{errorBanner}</span>
           </div>
           <button
             onClick={() => setErrorBanner(null)}
-            className="p-0.5 rounded hover:bg-red-900 text-red-300"
+            className="p-0.5 rounded hover:bg-[#C45D62]/30 text-[#E8EBF0]"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -44,15 +53,27 @@ export const App: React.FC = () => {
       <div className="flex-1 flex min-h-0 relative overflow-hidden">
         <LeftSidebar />
 
-        <main className="flex-1 relative min-w-0 h-full">
-          <WorldScene />
-          <MeetingRoom />
+        <main className="flex-1 relative min-w-0 h-full overflow-hidden">
+          {activeAppSection === 'office' ? (
+            <>
+              <WorldScene />
+              <MeetingRoom />
+            </>
+          ) : (
+            <PlatformWorkspaceViews />
+          )}
         </main>
 
         <RightInspector />
       </div>
 
       <BottomControlBar />
+
+      {/* Enterprise Command Palette (Cmd+K / Ctrl+K) */}
+      <CommandPalette />
+
+      {/* Enterprise Authentication & Workspace Modal */}
+      <AuthModal />
 
       {/* Workforce Factory Modal */}
       <FactoryPanel isModal />

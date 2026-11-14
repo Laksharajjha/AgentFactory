@@ -4,9 +4,31 @@ import { AgentProfile, AgentState } from '../types/agent';
 import { WorldEvent } from '../types/event';
 import { MeetingDecision, MeetingMessage, MeetingPresentation, MeetingSession } from '../types/meeting';
 import { TaskItem } from '../types/task';
-import { CeoOverview, ProjectSummary, RoomDefinition, TokenUsageSummary, WorldSnapshot } from '../types/world';
+import {
+  ArtifactItem,
+  CeoOverview,
+  ConnectedRepoItem,
+  ExecutionItem,
+  ProjectSummary,
+  QueueItem,
+  RoomDefinition,
+  SystemCapacity,
+  TokenUsageSummary,
+  WorldSnapshot,
+} from '../types/world';
 import { useEventStore } from './eventStore';
 import { useMeetingStore } from './meetingStore';
+
+export type AppSection =
+  | 'office'
+  | 'projects'
+  | 'workspaces'
+  | 'github'
+  | 'artifacts'
+  | 'executions'
+  | 'integrations'
+  | 'settings'
+  | 'admin';
 
 export type LeftSidebarTab =
   | 'overview'
@@ -453,6 +475,32 @@ interface WorldStoreState {
   activePresentation: MeetingPresentation | null;
   tokenUsage: TokenUsageSummary | null;
   ceoOverview: CeoOverview | null;
+  artifacts: ArtifactItem[];
+  executions: ExecutionItem[];
+  queueItems: QueueItem[];
+  connectedRepositories: ConnectedRepoItem[];
+  systemCapacity: SystemCapacity | null;
+
+  // Enterprise Shell & Multi-Tenant Auth State
+  activeAppSection: AppSection;
+  leftNavCollapsed: boolean;
+  rightInspectorCollapsed: boolean;
+  commandPaletteOpen: boolean;
+  authModalOpen: boolean;
+  authToken: string | null;
+  currentUser: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    platform_role: string;
+  } | null;
+  activeWorkspace: {
+    id: string;
+    tenant_id: string;
+    name: string;
+    slug: string;
+  } | null;
 
   viewMode: ViewMode;
   daylightPreset: DaylightPreset;
@@ -516,6 +564,24 @@ interface WorldStoreState {
   setAmbientOverride: (agentId: string, override: AmbientOverride) => void;
   setAudioMuted: (muted: boolean) => void;
 
+  setActiveAppSection: (section: AppSection) => void;
+  setLeftNavCollapsed: (collapsed: boolean) => void;
+  setRightInspectorCollapsed: (collapsed: boolean) => void;
+  setCommandPaletteOpen: (open: boolean) => void;
+  setAuthModalOpen: (open: boolean) => void;
+  setAuthSession: (
+    token: string,
+    user: { id: string; name: string; email: string; role: string; platform_role: string },
+    workspace: { id: string; tenant_id: string; name: string; slug: string }
+  ) => void;
+  logoutSession: () => Promise<void>;
+  createArtifact: (artifactType: string, title: string, structuredContent?: Record<string, unknown>) => Promise<ArtifactItem | null>;
+  connectGitHub: (accountLogin: string) => Promise<void>;
+  executeRepoBranch: (repoId: string, branchName: string, filePath?: string) => Promise<void>;
+  decideApproval: (executionId: string, approvalId: string, decision: 'APPROVED' | 'REJECTED') => Promise<void>;
+  cancelExecution: (executionId: string) => Promise<void>;
+  updateAdminGovernor: (config: Record<string, unknown>) => Promise<void>;
+
   fetchSnapshot: (workforceId?: string) => Promise<void>;
   deployWorkforce: (name: string, objective: string, projectContext?: ProjectSummary | null) => Promise<void>;
   triggerBoardroomMeeting: () => Promise<void>;
@@ -541,6 +607,31 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   activePresentation: null,
   tokenUsage: null,
   ceoOverview: null,
+  artifacts: [],
+  executions: [],
+  queueItems: [],
+  connectedRepositories: [],
+  systemCapacity: null,
+
+  activeAppSection: 'office',
+  leftNavCollapsed: false,
+  rightInspectorCollapsed: false,
+  commandPaletteOpen: false,
+  authModalOpen: false,
+  authToken: localStorage.getItem('forge_auth_token'),
+  currentUser: {
+    id: 'usr_director',
+    name: 'Executive Director',
+    email: 'director@projectforge.ai',
+    role: 'Founder & Principal Architect',
+    platform_role: 'PLATFORM_ADMIN',
+  },
+  activeWorkspace: {
+    id: 'ws_forge_default',
+    tenant_id: 'ten_usr_director',
+    name: "Executive Director's HQ Workspace",
+    slug: 'director-hq',
+  },
 
   viewMode: 'DOLLHOUSE',
   daylightPreset: 'DAYTIME',
@@ -592,6 +683,11 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
       activePresentation: snapshot.active_presentation || null,
       tokenUsage: snapshot.token_usage || null,
       ceoOverview: snapshot.ceo_overview || null,
+      artifacts: snapshot.artifacts || [],
+      executions: snapshot.executions || [],
+      queueItems: snapshot.queue_items || [],
+      connectedRepositories: snapshot.connected_repositories || [],
+      systemCapacity: snapshot.system_capacity || null,
     });
   },
 
@@ -891,6 +987,18 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
         finalReport: (payload.final_report as Record<string, unknown>) || null,
       });
       void get().fetchSnapshot(event.workforce_id);
+    } else if (
+      event_type === 'EXECUTION_QUEUED' ||
+      event_type === 'EXECUTION_ADMITTED' ||
+      event_type === 'EXECUTION_STARTED' ||
+      event_type === 'EXECUTION_COMPLETED' ||
+      event_type === 'EXECUTION_FAILED' ||
+      event_type === 'EXECUTION_CANCELLED' ||
+      event_type === 'QUEUE_POSITION_UPDATED' ||
+      event_type === 'CAPACITY_CHANGED' ||
+      event_type === 'ARTIFACT_GENERATED'
+    ) {
+      void get().fetchSnapshot(event.workforce_id);
     }
   },
 
@@ -1139,11 +1247,148 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
     })),
   setAudioMuted: (audioMuted) => set({ audioMuted }),
 
+  setActiveAppSection: (activeAppSection) => set({ activeAppSection }),
+  setLeftNavCollapsed: (leftNavCollapsed) => set({ leftNavCollapsed }),
+  setRightInspectorCollapsed: (rightInspectorCollapsed) => set({ rightInspectorCollapsed }),
+  setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
+  setAuthModalOpen: (authModalOpen) => set({ authModalOpen }),
+  setAuthSession: (token, user, workspace) => {
+    localStorage.setItem('forge_auth_token', token);
+    set({
+      authToken: token,
+      currentUser: user,
+      activeWorkspace: workspace,
+      authModalOpen: false,
+    });
+    void get().fetchSnapshot();
+  },
+  logoutSession: async () => {
+    const token = get().authToken;
+    if (token) {
+      await fetch(`${API_BASE_URL}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    localStorage.removeItem('forge_auth_token');
+    set({
+      authToken: null,
+      currentUser: {
+        id: 'usr_director',
+        name: 'Executive Director',
+        email: 'director@projectforge.ai',
+        role: 'Founder & Principal Architect',
+        platform_role: 'PLATFORM_ADMIN',
+      },
+      activeWorkspace: {
+        id: 'ws_forge_default',
+        tenant_id: 'ten_usr_director',
+        name: "Executive Director's HQ Workspace",
+        slug: 'director-hq',
+      },
+    });
+    void get().fetchSnapshot('wf_forge_default');
+  },
+
+  createArtifact: async (artifactType, title, structuredContent = {}) => {
+    const token = get().authToken;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${API_BASE_URL}/api/artifacts`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        artifact_type: artifactType,
+        title,
+        workforce_id: get().workforceId,
+        structured_content: structuredContent,
+      }),
+    });
+    if (!res.ok) return null;
+    const art = (await res.json()) as ArtifactItem;
+    set((s) => ({ artifacts: [art, ...s.artifacts] }));
+    return art;
+  },
+
+  connectGitHub: async (accountLogin) => {
+    const token = get().authToken;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    await fetch(`${API_BASE_URL}/api/github/connect`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ account_login: accountLogin }),
+    });
+    await get().fetchSnapshot();
+  },
+
+  executeRepoBranch: async (repoId, branchName, filePath = 'src/auth_middleware.py') => {
+    const token = get().authToken;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${API_BASE_URL}/api/github/repositories/${encodeURIComponent(repoId)}/execute-branch`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        execution_id: `exc_${Date.now().toString(36)}`,
+        branch_name: branchName,
+        file_path: filePath,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      useEventStore.getState().setErrorBanner(String(err.detail || `GitHub branch execution failed (${res.status})`));
+      return;
+    }
+    await get().fetchSnapshot();
+  },
+
+  decideApproval: async (executionId, approvalId, decision) => {
+    const token = get().authToken;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    await fetch(
+      `${API_BASE_URL}/api/executions/${encodeURIComponent(executionId)}/approvals/${encodeURIComponent(approvalId)}`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ decision }),
+      }
+    );
+    await get().fetchSnapshot();
+  },
+
+  cancelExecution: async (executionId) => {
+    const token = get().authToken;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    await fetch(`${API_BASE_URL}/api/executions/${encodeURIComponent(executionId)}/cancel`, {
+      method: 'POST',
+      headers,
+    });
+    await get().fetchSnapshot();
+  },
+
+  updateAdminGovernor: async (config) => {
+    const token = get().authToken;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    await fetch(`${API_BASE_URL}/api/admin/governor`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(config),
+    });
+    await get().fetchSnapshot();
+  },
+
   fetchSnapshot: async (workforceId) => {
     try {
       const target = workforceId || get().workforceId;
       const query = target && target !== 'wf_forge_default' ? `?workforce_id=${encodeURIComponent(target)}` : '';
-      const res = await fetch(`${API_BASE_URL}/api/world/snapshot${query}`);
+      const token = get().authToken;
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE_URL}/api/world/snapshot${query}`, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as WorldSnapshot;
       get().setSnapshot(data);
@@ -1156,9 +1401,12 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   deployWorkforce: async (name, objective, projectContext) => {
     set({ isDeploying: true });
     try {
+      const token = get().authToken;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${API_BASE_URL}/api/workforces`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           name,
           objective,
@@ -1168,7 +1416,11 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${res.status}`);
+        const msg =
+          typeof errData.detail === 'object' && errData.detail?.message
+            ? errData.detail.message
+            : errData.detail || `HTTP ${res.status}`;
+        throw new Error(String(msg));
       }
       const snapshot = (await res.json()) as WorldSnapshot;
       get().setSnapshot(snapshot);

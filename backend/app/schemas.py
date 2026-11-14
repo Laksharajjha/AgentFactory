@@ -38,6 +38,16 @@ EventTypeLiteral = Literal[
     "TASK_FAILED",
     "TOKEN_USAGE_UPDATED",
     "WORKFORCE_COMPLETED",
+    "EXECUTION_QUEUED",
+    "EXECUTION_ADMITTED",
+    "EXECUTION_STARTED",
+    "EXECUTION_WAITING",
+    "EXECUTION_COMPLETED",
+    "EXECUTION_FAILED",
+    "EXECUTION_CANCELLED",
+    "QUEUE_POSITION_UPDATED",
+    "CAPACITY_CHANGED",
+    "ARTIFACT_GENERATED",
 ]
 
 PresentationTypeLiteral = Literal[
@@ -236,7 +246,66 @@ class WorkforceCreateRequest(BaseModel):
     name: str = Field(default="Project Forge Initiative")
     objective: str = Field(..., min_length=5)
     auto_deploy: bool = True
+    repository_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     project_context: Optional[Dict[str, Any]] = None
+
+
+class AuthRegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2)
+    email: str = Field(..., min_length=5)
+    password: str = Field(..., min_length=6)
+    role_title: str = "Engineering Lead"
+
+
+class AuthLoginRequest(BaseModel):
+    email: str = Field(..., min_length=5)
+    password: str = Field(..., min_length=4)
+
+
+class OAuthLoginRequest(BaseModel):
+    provider: str = "github"
+    email: str
+    name: str = "Developer"
+
+
+class ArtifactCreateRequest(BaseModel):
+    artifact_type: str = "PPTX"
+    title: str
+    filename: Optional[str] = None
+    workforce_id: Optional[str] = None
+    task_id: Optional[str] = None
+    structured_content: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GitHubConnectRequest(BaseModel):
+    account_login: str = "Laksharajjha"
+    installation_id: Optional[str] = None
+    access_token: Optional[str] = None
+    repositories: Optional[List[Dict[str, Any]]] = None
+
+
+class GitHubBranchActionRequest(BaseModel):
+    execution_id: str
+    branch_name: str
+    file_path: str = "src/auth_middleware.py"
+    file_content: Optional[str] = None
+    commit_message: str = "feat: autonomous code modification on isolated working branch"
+
+
+class ExecutionApprovalDecisionRequest(BaseModel):
+    decision: Literal["APPROVED", "REJECTED"]
+    comment: Optional[str] = None
+
+
+class AdminGovernorUpdateRequest(BaseModel):
+    max_concurrent_workforces: Optional[int] = None
+    max_concurrent_executions_per_user: Optional[int] = None
+    max_queued_workforces_per_user: Optional[int] = None
+    max_global_queued_workforces: Optional[int] = None
+    max_agents_per_workforce: Optional[int] = None
+    max_execution_duration_seconds: Optional[int] = None
+    admission_paused: Optional[bool] = None
 
 
 class AgentInstructionRequest(BaseModel):
@@ -259,6 +328,7 @@ class LLMConfigUpdateRequest(BaseModel):
 
 class WorldSnapshotSchema(BaseModel):
     workforce_id: str
+    workspace_id: Optional[str] = None
     workforce_name: str
     objective: str
     workforce_status: str
@@ -275,3 +345,8 @@ class WorldSnapshotSchema(BaseModel):
     token_usage: TokenUsageSummarySchema
     recent_events: List[WorldEventSchema]
     ceo_overview: Dict[str, Any]
+    artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    executions: List[Dict[str, Any]] = Field(default_factory=list)
+    queue_items: List[Dict[str, Any]] = Field(default_factory=list)
+    connected_repositories: List[Dict[str, Any]] = Field(default_factory=list)
+    system_capacity: Optional[Dict[str, Any]] = None

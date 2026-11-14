@@ -11,13 +11,30 @@ env/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
 *.sqlite3
 
-# Environment variables (keep .env.example)
+# Secrets, Private Keys & Credentials (NEVER COMMIT)
+secrets/
+**/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*private-key*
+*credentials*.json
+
+# Environment variables (ignore all .env files, keep .env.example)
 .env
-.env.local
-.env.*.local
+.env.*
+**/.env
+**/.env.*
 !.env.example
+!**/.env.example
+
+# Local Runtime Storage (Artifacts & Sandboxes)
+storage/
+backend/storage/
 
 # Node / Frontend
 node_modules/

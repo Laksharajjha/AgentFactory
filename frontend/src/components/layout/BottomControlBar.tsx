@@ -31,42 +31,42 @@ export const BottomControlBar: React.FC = () => {
   };
 
   return (
-    <footer className="h-11 px-4 bg-[#0d1119]/95 backdrop-blur-md border-t border-slate-800/90 flex items-center justify-between gap-4 select-none z-30 shrink-0">
+    <footer className="h-9 px-3 bg-[#101216] border-t border-[#343A45]/80 flex items-center justify-between gap-4 select-none z-30 shrink-0 text-[#E8EBF0]">
       {/* Left: Simulation Clock & Play/Pause + Speed Controls (1x, 2x, 5x) */}
-      <div className="flex items-center gap-3 shrink-0">
-        <div className="flex items-center gap-1.5 text-xs font-mono text-slate-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-800">
-          <Clock className="w-3.5 h-3.5 text-amber-400" />
+      <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 text-[11px] font-mono text-[#A5ACB8] bg-[#151920] px-2 py-0.5 rounded-md border border-[#343A45]">
+          <Clock className="w-3 h-3 text-[#4778D0]" />
           <span>SIM {formatSimTime(simSeconds)}</span>
         </div>
 
         <button
           onClick={() => void setSimulationControl(simulationSpeed, !isPaused)}
-          className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 border transition ${
+          className={`px-2 py-0.5 rounded-md text-[11px] font-semibold flex items-center gap-1 border transition ${
             isPaused
-              ? 'bg-amber-500 text-slate-950 border-amber-400'
-              : 'bg-slate-900 text-slate-200 border-slate-800 hover:bg-slate-800'
+              ? 'bg-[#D29A43] text-[#101216] border-[#D29A43]'
+              : 'bg-[#151920] text-[#E8EBF0] border-[#343A45] hover:bg-[#1B2028]'
           }`}
         >
           {isPaused ? (
             <>
-              <Play className="w-3.5 h-3.5" /> Play
+              <Play className="w-3 h-3" /> Play
             </>
           ) : (
             <>
-              <Pause className="w-3.5 h-3.5" /> Pause
+              <Pause className="w-3 h-3" /> Pause
             </>
           )}
         </button>
 
-        <div className="flex items-center bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+        <div className="flex items-center bg-[#151920] p-0.5 rounded-md border border-[#343A45]">
           {[1, 2, 5].map((spd) => (
             <button
               key={spd}
               onClick={() => void setSimulationControl(spd, isPaused)}
-              className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold transition ${
+              className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold transition ${
                 simulationSpeed === spd
-                  ? 'bg-amber-500 text-slate-950'
-                  : 'text-slate-400 hover:text-white'
+                  ? 'bg-[#4778D0] text-white'
+                  : 'text-[#737D8C] hover:text-[#E8EBF0]'
               }`}
             >
               {spd}x
@@ -85,13 +85,13 @@ export const BottomControlBar: React.FC = () => {
         {isMeetingLive && activeMeeting ? (
           <button
             onClick={() => setSplitViewOpen(true)}
-            className="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 animate-pulse"
+            className="px-2.5 py-0.5 rounded-md bg-[#299B83]/20 border border-[#299B83]/50 text-[#299B83] text-[11px] font-semibold flex items-center gap-1.5 animate-pulse"
           >
-            <Video className="w-3.5 h-3.5" />
+            <Video className="w-3 h-3" />
             <span>LIVE: {activeMeeting.title.slice(0, 32)}...</span>
           </button>
         ) : (
-          <span className="text-[11px] text-slate-500 font-mono">
+          <span className="text-[10px] text-[#737D8C] font-mono">
             BOARDROOM: STANDBY
           </span>
         )}

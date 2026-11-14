@@ -112,8 +112,139 @@ export interface ProjectSummary {
   architectural_signals?: string[];
 }
 
+export interface ArtifactItem {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  workspace_id: string;
+  workforce_id?: string | null;
+  task_id?: string | null;
+  execution_id?: string | null;
+  agent_id?: string | null;
+  filename: string;
+  artifact_type: string;
+  mime_type: string;
+  storage_key: string;
+  file_size: number;
+  checksum_sha256: string;
+  version: number;
+  validation_status: string;
+  summary_metadata: Record<string, unknown>;
+  download_url: string;
+  download_expires_at: number;
+  created_at: string;
+}
+
+export interface ExecutionItem {
+  id: string;
+  workforce_id: string;
+  workspace_id: string;
+  user_id: string;
+  execution_type: string;
+  status: string;
+  execution_mode: string;
+  working_branch?: string | null;
+  base_commit?: string | null;
+  tokens_used: number;
+  duration_ms: number;
+  verification: Record<string, unknown>;
+  deliverables: Array<Record<string, unknown>>;
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+  tool_calls: Array<{
+    id: string;
+    tool_name: string;
+    category: string;
+    status: string;
+    duration_ms: number;
+    created_at: string;
+  }>;
+  approvals: Array<{
+    id: string;
+    action_type: string;
+    title: string;
+    description: string;
+    diff_preview?: string | null;
+    status: string;
+    created_at: string;
+  }>;
+}
+
+export interface QueueItem {
+  id: string;
+  execution_id: string;
+  workforce_id: string;
+  user_id: string;
+  workspace_id: string;
+  status: string;
+  queue_position?: number | null;
+  retry_count: number;
+  queued_at: string;
+  admitted_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ConnectedRepoItem {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  installation_id?: string | null;
+  full_name: string;
+  name: string;
+  owner: string;
+  default_branch: string;
+  clone_url: string;
+  html_url: string;
+  is_private: boolean;
+  language?: string | null;
+  repo_metadata: {
+    branches?: string[];
+    open_prs?: Array<{
+      number: number;
+      title: string;
+      head: string;
+      base: string;
+      status: string;
+      auto_merged: boolean;
+      url: string;
+      diff_lines: number;
+      created_at: string;
+    }>;
+  };
+  created_at: string;
+}
+
+export interface SystemCapacity {
+  authenticated_users: number;
+  active_sessions: number;
+  websocket_connections: number;
+  active_executions: number;
+  queued_executions: number;
+  available_execution_slots: number;
+  max_concurrent_workforces: number;
+  max_concurrent_executions_per_user: number;
+  max_queued_workforces_per_user: number;
+  max_global_queued_workforces: number;
+  max_agents_per_workforce: number;
+  max_sandboxes: number;
+  max_execution_duration_seconds: number;
+  admission_paused: boolean;
+  active_agent_tasks: number;
+  active_sandboxes: number;
+  queue_utilization_pct: number;
+  api_memory_mb: number;
+  api_cpu_seconds: number;
+  worker_memory_mb: number;
+  worker_cpu_seconds: number;
+  db_pool_size: number;
+  gemini_rate_limits: Record<string, unknown>;
+  storage_bytes_used: number;
+}
+
 export interface WorldSnapshot {
   workforce_id: string;
+  workspace_id?: string | null;
   workforce_name: string;
   objective: string;
   workforce_status: string;
@@ -130,4 +261,9 @@ export interface WorldSnapshot {
   token_usage: TokenUsageSummary;
   recent_events: WorldEvent[];
   ceo_overview: CeoOverview;
+  artifacts?: ArtifactItem[];
+  executions?: ExecutionItem[];
+  queue_items?: QueueItem[];
+  connected_repositories?: ConnectedRepoItem[];
+  system_capacity?: SystemCapacity | null;
 }

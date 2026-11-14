@@ -4,12 +4,19 @@ import {
   Bell,
   Boxes,
   Building2,
+  Command,
   Cpu,
   Footprints,
   KeyRound,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Rocket,
+  Search,
   Settings,
   Sun,
+  UserCheck,
   Users,
   Video,
   Volume2,
@@ -41,6 +48,18 @@ export const TopBar: React.FC = () => {
   const setSettingsModalOpen = useWorldStore((s) => s.setSettingsModalOpen);
   const setFactoryModalOpen = useWorldStore((s) => s.setFactoryModalOpen);
   const fetchSnapshot = useWorldStore((s) => s.fetchSnapshot);
+
+  // FORGE 3.0 Enterprise Shell State
+  const currentUser = useWorldStore((s) => s.currentUser);
+  const currentWorkspace = useWorldStore((s) => s.activeWorkspace);
+  const setCommandPaletteOpen = useWorldStore((s) => s.setCommandPaletteOpen);
+  const setAuthModalOpen = useWorldStore((s) => s.setAuthModalOpen);
+  const activeAppSection = useWorldStore((s) => s.activeAppSection);
+  const setActiveAppSection = useWorldStore((s) => s.setActiveAppSection);
+  const leftNavCollapsed = useWorldStore((s) => s.leftNavCollapsed);
+  const setLeftNavCollapsed = useWorldStore((s) => s.setLeftNavCollapsed);
+  const rightInspectorCollapsed = useWorldStore((s) => s.rightInspectorCollapsed);
+  const setRightInspectorCollapsed = useWorldStore((s) => s.setRightInspectorCollapsed);
 
   const events = useEventStore((s) => s.events);
   const { agents, activeCount } = useAgentState();
@@ -86,49 +105,70 @@ export const TopBar: React.FC = () => {
 
   return (
     <>
-      <header className="h-14 px-4 bg-[#0d1119]/95 backdrop-blur-md border-b border-slate-800/90 flex items-center justify-between select-none z-30 shrink-0">
-        {/* Left: PROJECT FORGE Brand & Prominent Mode Switch */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-amber-700 flex items-center justify-center shadow-lg shadow-amber-500/20">
-              <Boxes className="w-4 h-4 text-slate-950" />
+      <header className="h-12 px-3 bg-[#101216] border-b border-[#343A45]/80 flex items-center justify-between select-none z-30 shrink-0 text-[#E8EBF0]">
+        {/* Left: PROJECT FORGE 3.0 Brand, Workspace Selector & Mode Switch */}
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={() => setLeftNavCollapsed(!leftNavCollapsed)}
+            className="p-1.5 rounded-md bg-[#151920] hover:bg-[#1B2028] border border-[#343A45] text-[#A5ACB8] hover:text-[#E8EBF0] transition"
+            title={leftNavCollapsed ? 'Expand Left Drawer' : 'Collapse Left Drawer'}
+          >
+            {leftNavCollapsed ? (
+              <PanelLeftOpen className="w-3.5 h-3.5" />
+            ) : (
+              <PanelLeftClose className="w-3.5 h-3.5" />
+            )}
+          </button>
+
+          <div
+            onClick={() => setActiveAppSection('office')}
+            className="flex items-center gap-2 cursor-pointer"
+          >
+            <div className="w-7 h-7 rounded-md bg-[#4778D0] flex items-center justify-center shadow-sm">
+              <Boxes className="w-3.5 h-3.5 text-white" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-black tracking-wider text-white">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold tracking-wide text-[#E8EBF0]">
                   PROJECT FORGE
                 </span>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                  2.1 LIVING OFFICE
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#4778D0]/20 text-[#4778D0] border border-[#4778D0]/40">
+                  3.0 PLATFORM
                 </span>
               </div>
-              <div className="text-[11px] text-slate-400 truncate max-w-[180px]">
-                {workforceName}
+              <div className="text-[10px] text-[#737D8C] truncate max-w-[160px]">
+                {currentWorkspace?.name || workforceName}
               </div>
             </div>
           </div>
 
-          <div className="h-6 w-px bg-slate-800 hidden sm:block" />
+          <div className="h-5 w-px bg-[#343A45] hidden sm:block" />
 
           {/* Prominent DOLLHOUSE | WALK AROUND Switcher */}
-          <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-700/80 shadow-inner">
+          <div className="flex items-center bg-[#151920] p-0.5 rounded-md border border-[#343A45]">
             <button
-              onClick={() => setViewMode('DOLLHOUSE')}
-              className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                viewMode === 'DOLLHOUSE'
-                  ? 'bg-amber-500 text-slate-950 shadow'
-                  : 'text-slate-300 hover:text-white'
+              onClick={() => {
+                setActiveAppSection('office');
+                setViewMode('DOLLHOUSE');
+              }}
+              className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1.5 transition ${
+                activeAppSection === 'office' && viewMode === 'DOLLHOUSE'
+                  ? 'bg-[#4778D0] text-white'
+                  : 'text-[#A5ACB8] hover:text-[#E8EBF0]'
               }`}
             >
               <Building2 className="w-3.5 h-3.5" />
               <span>DOLLHOUSE</span>
             </button>
             <button
-              onClick={() => setViewMode('WALK')}
-              className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                viewMode === 'WALK'
-                  ? 'bg-emerald-500 text-slate-950 shadow'
-                  : 'text-slate-300 hover:text-white'
+              onClick={() => {
+                setActiveAppSection('office');
+                setViewMode('WALK');
+              }}
+              className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1.5 transition ${
+                activeAppSection === 'office' && viewMode === 'WALK'
+                  ? 'bg-[#299B83] text-white'
+                  : 'text-[#A5ACB8] hover:text-[#E8EBF0]'
               }`}
             >
               <Footprints className="w-3.5 h-3.5" />
@@ -136,58 +176,66 @@ export const TopBar: React.FC = () => {
             </button>
           </div>
 
+          {/* Command Palette Trigger (Cmd+K / Ctrl+K) */}
+          <button
+            onClick={() => setCommandPaletteOpen(true)}
+            className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#151920] hover:bg-[#1B2028] border border-[#343A45] text-xs text-[#A5ACB8] hover:text-[#E8EBF0] transition"
+            title="Open Command Palette (Cmd+K / Ctrl+K)"
+          >
+            <Search className="w-3.5 h-3.5 text-[#737D8C]" />
+            <span className="text-[11px]">Jump or run command...</span>
+            <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#101216] border border-[#343A45] text-[#737D8C] flex items-center gap-0.5">
+              <Command className="w-2.5 h-2.5" />K
+            </kbd>
+          </button>
+
           {/* Daylight Preset Button */}
           <button
             onClick={cycleDaylightPreset}
-            className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-sky-300 transition"
+            className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#151920] hover:bg-[#1B2028] border border-[#343A45] text-xs text-[#A5ACB8] transition"
             title="Cycle Natural Daylight Preset (Morning / Daytime / Afternoon)"
           >
-            <Sun className="w-3.5 h-3.5 text-amber-400" />
-            <span className="font-mono text-[11px]">{daylightPreset}</span>
+            <Sun className="w-3.5 h-3.5 text-[#D29A43]" />
+            <span className="font-mono text-[10px]">{daylightPreset}</span>
           </button>
 
           {/* Explicit AI Provider Status Badge (DEMO MODE vs LIVE GEMINI MODE) */}
           <button
             onClick={() => setSettingsModalOpen(true)}
-            className={`hidden md:flex items-center gap-2 px-3 py-1 rounded-full border text-xs transition ${
+            className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] transition ${
               isLiveGeminiMode
-                ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300'
-                : 'bg-slate-900 border-slate-700 text-amber-300 hover:border-amber-500/50'
+                ? 'bg-[#299B83]/15 border-[#299B83]/50 text-[#299B83]'
+                : 'bg-[#151920] border-[#343A45] text-[#D29A43] hover:border-[#D29A43]/60'
             }`}
-            title={
-              isLiveGeminiMode
-                ? 'LIVE GEMINI MODE: Valid API key configured and live model calls enabled'
-                : 'DEMO MODE: No API key configured. Deterministic local simulation is active (0 paid API calls).'
-            }
           >
             <span
-              className={`w-2 h-2 rounded-full ${
-                isLiveGeminiMode ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+              className={`w-1.5 h-1.5 rounded-full ${
+                isLiveGeminiMode ? 'bg-[#299B83] animate-pulse' : 'bg-[#D29A43]'
               }`}
             />
-            <span className="font-mono font-bold text-[11px]">
-              {isLiveGeminiMode ? 'LIVE GEMINI MODE' : 'DEMO MODE'}
+            <span className="font-mono font-semibold text-[10px]">
+              {isLiveGeminiMode ? 'LIVE GEMINI' : 'DEMO MODE'}
             </span>
           </button>
         </div>
 
-        {/* Center/Right Telemetry & Primary Actions */}
-        <div className="flex items-center gap-2.5">
+        {/* Right Telemetry, Workspace User & Primary Actions */}
+        <div className="flex items-center gap-2">
           {/* Active Workforce Count */}
-          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs">
-            <Users className="w-3.5 h-3.5 text-sky-400" />
-            <span className="font-mono font-bold text-white">
-              {activeCount} active / {agents.length} employees
+          <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#151920] border border-[#343A45] text-[11px]">
+            <Users className="w-3.5 h-3.5 text-[#4778D0]" />
+            <span className="font-mono font-semibold text-[#E8EBF0]">
+              {activeCount}/{agents.length} active
             </span>
           </div>
 
           {/* Global Token Consumption */}
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs">
-            <Cpu className="w-3.5 h-3.5 text-amber-400" />
-            <span className="font-mono font-bold text-amber-300">
+          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#151920] border border-[#343A45] text-[11px]">
+            <Cpu className="w-3.5 h-3.5 text-[#D29A43]" />
+            <span className="font-mono font-semibold text-[#E8EBF0]">
               {(tokenUsage?.total_tokens_used || 0).toLocaleString()}
             </span>
-            <span className="text-slate-500 font-mono text-[10px]">
+            <span className="text-[#737D8C] font-mono text-[10px]">
               / {(tokenUsage?.global_token_budget || 100000).toLocaleString()}
             </span>
           </div>
@@ -195,54 +243,67 @@ export const TopBar: React.FC = () => {
           {/* Boardroom Split-View Quick Toggle */}
           <button
             onClick={() => {
+              setActiveAppSection('office');
               const nextOpen = !splitViewOpen;
               setSplitViewOpen(nextOpen);
               if (nextOpen && viewMode === 'DOLLHOUSE') {
                 focusRoom('boardroom', 'ARCHITECTURAL');
               }
             }}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition ${
+            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1.5 border transition ${
               isMeetingLive
-                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 animate-pulse'
+                ? 'bg-[#299B83]/20 border-[#299B83]/50 text-[#299B83] animate-pulse'
                 : splitViewOpen
-                ? 'bg-sky-500/20 border-sky-500/50 text-sky-300'
-                : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
+                ? 'bg-[#4778D0]/20 border-[#4778D0]/50 text-[#4778D0]'
+                : 'bg-[#151920] border-[#343A45] text-[#A5ACB8] hover:text-[#E8EBF0]'
             }`}
           >
             <Video className="w-3.5 h-3.5" />
-            <span>Boardroom</span>
+            <span className="hidden md:inline">Boardroom</span>
           </button>
 
           {/* Primary Submit Project / Factory CTA */}
           <button
             onClick={() => setFactoryModalOpen(true)}
-            className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-amber-500/20 transition"
+            className="px-3 py-1 rounded-md bg-[#4778D0] hover:bg-[#3b66b5] text-white font-semibold text-[11px] flex items-center gap-1.5 transition"
           >
             <Rocket className="w-3.5 h-3.5" />
             <span>New Project</span>
           </button>
 
-          {/* Optional Ambient Audio Mute/Unmute Toggle */}
+          {/* Authenticated User & Workspace Badge */}
+          <button
+            onClick={() => setAuthModalOpen(true)}
+            className="px-2.5 py-1 rounded-md bg-[#151920] hover:bg-[#1B2028] border border-[#343A45] text-[11px] text-[#E8EBF0] flex items-center gap-1.5 transition"
+            title="Workspace & Identity Management"
+          >
+            <UserCheck className="w-3.5 h-3.5 text-[#299B83]" />
+            <span className="hidden md:inline font-medium max-w-[110px] truncate">
+              {currentUser?.name || 'Sign In'}
+            </span>
+          </button>
+
+          {/* Ambient Audio Toggle */}
           <button
             onClick={() => setAudioMuted(!audioMuted)}
-            className={`p-2 rounded-xl border transition ${
+            className={`p-1.5 rounded-md border transition ${
               audioMuted
-                ? 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
-                : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                ? 'bg-[#151920] border-[#343A45] text-[#737D8C] hover:text-[#E8EBF0]'
+                : 'bg-[#299B83]/15 border-[#299B83]/40 text-[#299B83]'
             }`}
             title={audioMuted ? 'Unmute Ambient Office Audio' : 'Mute Ambient Office Audio'}
           >
-            {audioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            {audioMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
           </button>
 
           {/* Notification Indicator */}
           <div
-            className="relative p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300"
+            className="relative p-1.5 rounded-md bg-[#151920] border border-[#343A45] text-[#A5ACB8]"
             title={`${events.length} World Events Logged`}
           >
-            <Bell className="w-4 h-4" />
+            <Bell className="w-3.5 h-3.5" />
             {events.length > 0 && (
-              <span className="absolute -top-1 -right-1 px-1 min-w-[16px] h-4 rounded-full bg-amber-500 text-slate-950 font-mono text-[9px] font-bold flex items-center justify-center">
+              <span className="absolute -top-1 -right-1 px-1 min-w-[14px] h-3.5 rounded-full bg-[#4778D0] text-white font-mono text-[8px] font-bold flex items-center justify-center">
                 {events.length > 99 ? '99+' : events.length}
               </span>
             )}
@@ -251,10 +312,23 @@ export const TopBar: React.FC = () => {
           {/* Settings Button */}
           <button
             onClick={() => setSettingsModalOpen(true)}
-            className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition"
+            className="p-1.5 rounded-md bg-[#151920] hover:bg-[#1B2028] border border-[#343A45] text-[#A5ACB8] hover:text-[#E8EBF0] transition"
             title="LLM Gateway, AI Mode & Graphics Quality Settings"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Right Inspector Collapse Toggle */}
+          <button
+            onClick={() => setRightInspectorCollapsed(!rightInspectorCollapsed)}
+            className="p-1.5 rounded-md bg-[#151920] hover:bg-[#1B2028] border border-[#343A45] text-[#A5ACB8] hover:text-[#E8EBF0] transition"
+            title={rightInspectorCollapsed ? 'Expand Right Inspector' : 'Collapse Right Inspector'}
+          >
+            {rightInspectorCollapsed ? (
+              <PanelRightOpen className="w-3.5 h-3.5" />
+            ) : (
+              <PanelRightClose className="w-3.5 h-3.5" />
+            )}
           </button>
         </div>
       </header>
@@ -267,48 +341,47 @@ export const TopBar: React.FC = () => {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-lg rounded-2xl bg-[#101622] border border-slate-700/80 shadow-2xl overflow-hidden"
+            className="w-full max-w-lg rounded-md bg-[#151920] border border-[#343A45] shadow-2xl overflow-hidden text-[#E8EBF0]"
           >
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/70">
+            <div className="p-3.5 border-b border-[#343A45] flex items-center justify-between bg-[#101216]">
               <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-amber-400" />
-                <h3 className="text-sm font-bold text-white">
+                <KeyRound className="w-4 h-4 text-[#4778D0]" />
+                <h3 className="text-sm font-semibold text-[#E8EBF0]">
                   AI Execution Mode & Graphics Performance Settings
                 </h3>
               </div>
               <button
                 onClick={() => setSettingsModalOpen(false)}
-                className="p-1 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
+                className="p-1 rounded-md bg-[#1B2028] text-[#A5ACB8] hover:text-[#E8EBF0]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveSettings} className="p-4 space-y-4 text-xs text-slate-200">
-              {/* Explicit Provider Status Card */}
-              <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <form onSubmit={handleSaveSettings} className="p-4 space-y-4 text-xs">
+              <div className="p-3 rounded-md bg-[#101216] border border-[#343A45] space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold uppercase text-slate-400">
+                  <span className="text-[11px] font-semibold uppercase text-[#A5ACB8]">
                     Current AI Execution Status
                   </span>
                   <span
                     className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
                       isLiveGeminiMode
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : 'bg-amber-500/20 text-amber-300'
+                        ? 'bg-[#299B83]/20 text-[#299B83]'
+                        : 'bg-[#D29A43]/20 text-[#D29A43]'
                     }`}
                   >
                     {isLiveGeminiMode ? 'LIVE GEMINI MODE' : 'DEMO MODE'}
                   </span>
                 </div>
-                <div className="font-mono text-xs text-white leading-relaxed">
+                <div className="font-mono text-xs text-[#E8EBF0] leading-relaxed">
                   {tokenUsage?.provider_status ||
                     'DEMO MODE: No API key configured. Deterministic local simulation is active.'}
                 </div>
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-slate-400 uppercase mb-1">
+                <label className="block text-[11px] font-semibold text-[#A5ACB8] uppercase mb-1">
                   Google Gemini API Key (Server-Side Only)
                 </label>
                 <input
@@ -321,19 +394,19 @@ export const TopBar: React.FC = () => {
                     }
                   }}
                   placeholder="Enter GEMINI_API_KEY to enable Live Gemini Mode..."
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#101216] border border-[#343A45] rounded-md px-3 py-2 text-xs text-[#E8EBF0] focus:outline-none focus:border-[#4778D0]"
                 />
-                <p className="text-[10px] text-slate-500 mt-1">
+                <p className="text-[10px] text-[#737D8C] mt-1">
                   Leave blank to stay in deterministic Demo Mode with zero paid API requests.
                 </p>
               </div>
 
-              <label className="flex items-center justify-between p-3 rounded-xl bg-slate-900/70 border border-slate-800 cursor-pointer">
+              <label className="flex items-center justify-between p-3 rounded-md bg-[#101216] border border-[#343A45] cursor-pointer">
                 <div>
-                  <div className="text-xs font-bold text-white">
+                  <div className="text-xs font-semibold text-[#E8EBF0]">
                     Explicitly Enable Live Gemini Execution
                   </div>
-                  <div className="text-[10px] text-slate-400">
+                  <div className="text-[10px] text-[#A5ACB8]">
                     When disabled, agents execute using deterministic Demo Mode (0 API tokens billed).
                   </div>
                 </div>
@@ -341,18 +414,18 @@ export const TopBar: React.FC = () => {
                   type="checkbox"
                   checked={enableLiveToggle}
                   onChange={(e) => setEnableLiveToggle(e.target.checked)}
-                  className="w-4 h-4 accent-amber-500"
+                  className="w-4 h-4 accent-[#4778D0]"
                 />
               </label>
 
               <div>
-                <label className="block text-[11px] font-semibold text-slate-400 uppercase mb-1">
+                <label className="block text-[11px] font-semibold text-[#A5ACB8] uppercase mb-1">
                   Primary Gemini Model ID (Tuned to Your Free Tier Quotas)
                 </label>
                 <select
                   value={modelInput}
                   onChange={(e) => setModelInput(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
+                  className="w-full bg-[#101216] border border-[#343A45] rounded-md px-3 py-2 text-xs text-[#E8EBF0] focus:outline-none focus:border-[#4778D0]"
                 >
                   <option value="gemini-3.1-flash-lite-preview">
                     gemini-3.1-flash-lite-preview — Recommended (15 RPM • 250K TPM • 500 RPD)
@@ -370,15 +443,14 @@ export const TopBar: React.FC = () => {
                     gemini-3-flash-preview — Low Daily Quota (5 RPM • 250K TPM • 20 RPD)
                   </option>
                 </select>
-                <p className="text-[10px] text-emerald-400/90 mt-1">
+                <p className="text-[10px] text-[#299B83] mt-1">
                   Strict sliding-window rate limiter active: paces requests automatically (4.2s spacing on 15 RPM tier) and disables 0-quota Pro/2.0 models.
                 </p>
               </div>
 
-              {/* 3D Graphics Quality & Developer Telemetry Section */}
-              <div className="pt-2 border-t border-slate-800 space-y-2.5">
+              <div className="pt-2 border-t border-[#343A45] space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold text-slate-400 uppercase">
+                  <span className="text-[11px] font-semibold text-[#A5ACB8] uppercase">
                     3D Rendering Quality Tier
                   </span>
                   <div className="flex items-center gap-1">
@@ -387,10 +459,10 @@ export const TopBar: React.FC = () => {
                         key={q}
                         type="button"
                         onClick={() => setQualityPreset(q)}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold transition ${
+                        className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold transition ${
                           qualityPreset === q
-                            ? 'bg-amber-500 text-slate-950'
-                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                            ? 'bg-[#4778D0] text-white'
+                            : 'bg-[#101216] text-[#A5ACB8] border border-[#343A45] hover:bg-[#1B2028]'
                         }`}
                       >
                         {q}
@@ -400,17 +472,17 @@ export const TopBar: React.FC = () => {
                 </div>
 
                 <div className="flex items-center justify-between pt-1">
-                  <span className="text-[11px] text-slate-400 flex items-center gap-1.5">
-                    <Activity className="w-3.5 h-3.5 text-sky-400" />
+                  <span className="text-[11px] text-[#A5ACB8] flex items-center gap-1.5">
+                    <Activity className="w-3.5 h-3.5 text-[#4778D0]" />
                     <span>Developer Performance Monitor (Ctrl+Shift+P)</span>
                   </span>
                   <button
                     type="button"
                     onClick={() => setDevPerfOpen(!devPerfOpen)}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold ${
+                    className={`px-2.5 py-1 rounded text-[10px] font-mono font-bold ${
                       devPerfOpen
-                        ? 'bg-sky-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        ? 'bg-[#4778D0] text-white'
+                        : 'bg-[#101216] text-[#A5ACB8] border border-[#343A45] hover:bg-[#1B2028]'
                     }`}
                   >
                     {devPerfOpen ? 'VISIBLE' : 'HIDDEN'}
@@ -422,14 +494,14 @@ export const TopBar: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setSettingsModalOpen(false)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300"
+                  className="px-3 py-1.5 rounded-md bg-[#1B2028] text-[#A5ACB8] hover:text-[#E8EBF0]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={savingSettings}
-                  className="px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold"
+                  className="px-4 py-1.5 rounded-md bg-[#4778D0] hover:bg-[#3b66b5] text-white font-semibold"
                 >
                   {savingSettings ? 'Saving...' : 'Save Configuration'}
                 </button>

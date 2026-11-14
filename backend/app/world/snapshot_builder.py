@@ -7,11 +7,18 @@ _init_lock = asyncio.Lock()
 
 from app.agents.agent_memory import AgentMemoryManager
 from app.agents.agent_registry import AgentRegistry
+from app.artifacts.artifact_manager import ArtifactManager
+from app.auth.auth_service import AuthService
 from app.config import settings
+from app.integrations.github_service import GitHubService
 from app.llm.gemini_provider import gemini_provider
 from app.models import (
     AgentEventModel,
     AgentModel,
+    ArtifactModel,
+    ConnectedRepositoryModel,
+    ExecutionApprovalModel,
+    ExecutionModel,
     LLMRequestModel,
     MeetingDecisionModel,
     MeetingMessageModel,
@@ -20,9 +27,12 @@ from app.models import (
     MeetingPresentationModel,
     TaskDependencyModel,
     TaskModel,
+    ToolCallModel,
     UserModel,
     WorkforceModel,
 )
+from app.scheduler.capacity_monitor import CapacityMonitor
+from app.scheduler.queue_repository import QueueRepository
 from app.schemas import (
     AgentMemorySchema,
     AgentProfileSchema,
@@ -43,26 +53,47 @@ class SnapshotBuilder:
     """Builds complete, validated world snapshots and CEO Command Centre telemetry from SQLite."""
 
     @staticmethod
-    async def ensure_default_workforce(session: AsyncSession) -> WorkforceModel:
+    async def ensure_default_workforce(
+        session: AsyncSession,
+        user_id: str = "usr_director",
+        workspace_id: str = "ws_forge_default",
+    ) -> WorkforceModel:
         async with _init_lock:
+            if user_id == "usr_director":
+                await AuthService.ensure_default_director_context(session)
+
             res = await session.execute(
-                select(WorkforceModel).order_by(desc(WorkforceModel.created_at)).limit(1)
+                select(WorkforceModel)
+                .where(WorkforceModel.workspace_id == workspace_id)
+                .order_by(desc(WorkforceModel.created_at))
+                .limit(1)
             )
             wf = res.scalar_one_or_none()
             if wf:
                 return wf
 
-            u_res = await session.execute(
-                select(UserModel).where(UserModel.id == "usr_director")
-            )
-            user = u_res.scalar_one_or_none()
-            if not user:
-                user = UserModel(id="usr_director", name="Executive Director", role="Founder")
-                session.add(user)
+            # Fallback for legacy default workforce before workspace_id backfill
+            if workspace_id == "ws_forge_default":
+                legacy_res = await session.execute(
+                    select(WorkforceModel)
+                    .where(WorkforceModel.workspace_id.is_(None))
+                    .order_by(desc(WorkforceModel.created_at))
+                    .limit(1)
+                )
+                legacy_wf = legacy_res.scalar_one_or_none()
+                if legacy_wf:
+                    legacy_wf.workspace_id = "ws_forge_default"
+                    legacy_wf.tenant_id = "ten_usr_director"
+                    legacy_wf.user_id = legacy_wf.user_id or "usr_director"
+                    await session.commit()
+                    return legacy_wf
 
+            wf_id = "wf_forge_default" if workspace_id == "ws_forge_default" else f"wf_{workspace_id[-10:]}"
             wf = WorkforceModel(
-                id="wf_forge_default",
-                user_id=user.id,
+                id=wf_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                tenant_id=f"ten_{user_id}",
                 name="Project Forge Core Engineering",
                 objective=(
                     "Standby in virtual headquarters. Submit a software project objective or ZIP archive "
@@ -371,6 +402,8 @@ class SnapshotBuilder:
     async def build_world_snapshot(
         session: AsyncSession,
         workforce_id: Optional[str] = None,
+        user_id: str = "usr_director",
+        workspace_id: str = "ws_forge_default",
     ) -> WorldSnapshotSchema:
         if workforce_id:
             wf_res = await session.execute(
@@ -378,9 +411,11 @@ class SnapshotBuilder:
             )
             workforce = wf_res.scalar_one_or_none()
             if not workforce:
-                workforce = await SnapshotBuilder.ensure_default_workforce(session)
+                workforce = await SnapshotBuilder.ensure_default_workforce(session, user_id, workspace_id)
         else:
-            workforce = await SnapshotBuilder.ensure_default_workforce(session)
+            workforce = await SnapshotBuilder.ensure_default_workforce(session, user_id, workspace_id)
+
+        effective_ws_id = workforce.workspace_id or workspace_id
 
         agents = await AgentRegistry.get_workforce_agents(session, workforce.id)
         if not agents:
@@ -487,8 +522,88 @@ class SnapshotBuilder:
             "completed_deliverables": all_deliverables,
         }
 
+        # Load Workspace Artifacts, Executions, Queue & Connected Repositories
+        art_res = await session.execute(
+            select(ArtifactModel)
+            .where(ArtifactModel.workspace_id == effective_ws_id)
+            .order_by(desc(ArtifactModel.created_at))
+            .limit(30)
+        )
+        artifacts_list = [ArtifactManager.serialize_artifact(a) for a in art_res.scalars().all()]
+
+        exec_res = await session.execute(
+            select(ExecutionModel)
+            .where(ExecutionModel.workspace_id == effective_ws_id)
+            .order_by(desc(ExecutionModel.created_at))
+            .limit(20)
+        )
+        exec_rows = list(exec_res.scalars().all())
+        executions_list: List[Dict[str, Any]] = []
+        for ex in exec_rows:
+            tc_res = await session.execute(
+                select(ToolCallModel).where(ToolCallModel.execution_id == ex.id).order_by(ToolCallModel.created_at)
+            )
+            apr_res = await session.execute(
+                select(ExecutionApprovalModel).where(ExecutionApprovalModel.execution_id == ex.id)
+            )
+            executions_list.append(
+                {
+                    "id": ex.id,
+                    "workforce_id": ex.workforce_id,
+                    "workspace_id": ex.workspace_id,
+                    "user_id": ex.user_id,
+                    "execution_type": ex.execution_type,
+                    "status": ex.status,
+                    "execution_mode": ex.execution_mode,
+                    "working_branch": ex.working_branch,
+                    "base_commit": ex.base_commit,
+                    "tokens_used": ex.tokens_used,
+                    "duration_ms": ex.duration_ms,
+                    "verification": ex.verification_json or {},
+                    "deliverables": ex.deliverables_json or [],
+                    "error_message": ex.error_message,
+                    "created_at": ex.created_at.isoformat() if ex.created_at else "",
+                    "completed_at": ex.completed_at.isoformat() if ex.completed_at else None,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "tool_name": tc.tool_name,
+                            "category": tc.tool_category,
+                            "status": tc.status,
+                            "duration_ms": tc.duration_ms,
+                            "created_at": tc.created_at.isoformat() if tc.created_at else "",
+                        }
+                        for tc in tc_res.scalars().all()
+                    ],
+                    "approvals": [
+                        {
+                            "id": ap.id,
+                            "action_type": ap.action_type,
+                            "title": ap.title,
+                            "description": ap.description,
+                            "diff_preview": ap.diff_preview,
+                            "status": ap.status,
+                            "created_at": ap.created_at.isoformat() if ap.created_at else "",
+                        }
+                        for ap in apr_res.scalars().all()
+                    ],
+                }
+            )
+
+        queue_items = await QueueRepository.list_queue_snapshot(session, workspace_id=effective_ws_id)
+
+        repo_res = await session.execute(
+            select(ConnectedRepositoryModel)
+            .where(ConnectedRepositoryModel.workspace_id == effective_ws_id)
+            .order_by(desc(ConnectedRepositoryModel.created_at))
+        )
+        connected_repos = [GitHubService.serialize_repo(r) for r in repo_res.scalars().all()]
+
+        sys_capacity = await CapacityMonitor.get_system_capacity(session)
+
         return WorldSnapshotSchema(
             workforce_id=workforce.id,
+            workspace_id=effective_ws_id,
             workforce_name=workforce.name,
             objective=workforce.objective,
             workforce_status=workforce.status,
@@ -505,4 +620,9 @@ class SnapshotBuilder:
             token_usage=token_usage,
             recent_events=event_schemas,
             ceo_overview=ceo_overview,
+            artifacts=artifacts_list,
+            executions=executions_list,
+            queue_items=queue_items,
+            connected_repositories=connected_repos,
+            system_capacity=sys_capacity,
         )
