@@ -1,6 +1,10 @@
 import hashlib
 import os
+import urllib.parse
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -23,6 +27,7 @@ class Settings(BaseSettings):
     # Database: Neon PostgreSQL (authoritative production store) with non-destructive local SQLite fallback
     DATABASE_URL: str = "sqlite+aiosqlite:///./project_forge.db"
     NEON_DATABASE_URL: str = ""
+    DIRECT_DATABASE_URL: str = ""
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_RECYCLE_SECONDS: int = 300
@@ -41,6 +46,7 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
     GITHUB_PRIVATE_KEY_PEM: str = ""
+    GITHUB_PRIVATE_KEY_PATH: str = ""
     GITHUB_WEBHOOK_SECRET: str = ""
 
     # Upstash Redis Coordination & Distributed Locks
@@ -48,12 +54,17 @@ class Settings(BaseSettings):
     UPSTASH_REDIS_REST_TOKEN: str = ""
     REDIS_URL: str = ""
 
-    # S3-Compatible Object Storage & Signed URLs
+    # S3-Compatible Object Storage & Signed URLs (supports both OBJECT_STORAGE_* and AWS_* aliases)
     OBJECT_STORAGE_BUCKET: str = "project-forge-artifacts"
     OBJECT_STORAGE_ENDPOINT: str = ""
     OBJECT_STORAGE_REGION: str = "auto"
     OBJECT_STORAGE_ACCESS_KEY: str = ""
     OBJECT_STORAGE_SECRET_KEY: str = ""
+    AWS_S3_BUCKET: str = ""
+    AWS_ENDPOINT_URL_S3: str = ""
+    AWS_REGION: str = ""
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
     ARTIFACT_STORAGE_DIR: str = "./storage/artifacts"
     WORKSPACE_SANDBOX_ROOT: str = "./storage/sandboxes"
     SIGNED_URL_TTL_SECONDS: int = 900
@@ -70,19 +81,37 @@ class Settings(BaseSettings):
     ADMISSION_PAUSED: bool = False
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(_BACKEND_DIR / ".env"), ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    @property
-    def effective_database_url(self) -> str:
-        url = (self.NEON_DATABASE_URL or self.DATABASE_URL).strip()
+    @staticmethod
+    def _normalize_postgres_url(raw_url: str) -> str:
+        url = raw_url.strip()
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
         elif url.startswith("postgresql://") and "+asyncpg" not in url:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql+asyncpg://") and "?" in url:
+            parts = urllib.parse.urlsplit(url)
+            q = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+            if "sslmode" in q:
+                ssl_val = q.pop("sslmode")[0]
+                if "ssl" not in q and ssl_val in ("require", "verify-ca", "verify-full", "prefer"):
+                    q["ssl"] = ["require"]
+            q.pop("channel_binding", None)
+            new_query = urllib.parse.urlencode(q, doseq=True)
+            url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
         return url
+
+    @property
+    def effective_database_url(self) -> str:
+        return self._normalize_postgres_url(self.NEON_DATABASE_URL or self.DATABASE_URL)
+
+    @property
+    def effective_direct_database_url(self) -> str:
+        return self._normalize_postgres_url(self.DIRECT_DATABASE_URL or self.NEON_DATABASE_URL or self.DATABASE_URL)
 
     @property
     def is_postgres(self) -> bool:

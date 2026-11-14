@@ -79,16 +79,17 @@ async def apply_rls_context(
         logger.debug("RLS session context skipped: %s", exc)
 
 
-async def _ensure_backward_compatible_columns(conn) -> None:
+async def _ensure_backward_compatible_columns() -> None:
     """Non-destructively adds Project Forge 3.0 multi-tenant columns to existing SQLite/Postgres tables."""
+    bool_true = "TRUE" if settings.is_postgres else "1"
     alter_statements = [
         ("users", "email", "VARCHAR(256)"),
         ("users", "password_hash", "VARCHAR(256)"),
         ("users", "platform_role", "VARCHAR(64) DEFAULT 'USER'"),
-        ("users", "email_verified", "BOOLEAN DEFAULT 1"),
+        ("users", "email_verified", f"BOOLEAN DEFAULT {bool_true}"),
         ("users", "auth_provider", "VARCHAR(64) DEFAULT 'local'"),
         ("users", "default_workspace_id", "VARCHAR(64)"),
-        ("users", "is_active", "BOOLEAN DEFAULT 1"),
+        ("users", "is_active", f"BOOLEAN DEFAULT {bool_true}"),
         ("workforces", "workspace_id", "VARCHAR(64)"),
         ("workforces", "tenant_id", "VARCHAR(64)"),
         ("workforces", "repository_id", "VARCHAR(64)"),
@@ -103,19 +104,27 @@ async def _ensure_backward_compatible_columns(conn) -> None:
         ("token_usage", "user_id", "VARCHAR(64)"),
         ("token_usage", "workspace_id", "VARCHAR(64)"),
     ]
-    for table_name, col_name, col_type in alter_statements:
-        try:
-            await conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
-        except Exception:
-            # Column already exists
-            pass
+    if settings.is_postgres:
+        async with engine.begin() as conn:
+            for table_name, col_name, col_type in alter_statements:
+                await conn.execute(
+                    text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+                )
+    else:
+        for table_name, col_name, col_type in alter_statements:
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"))
+            except Exception:
+                # Column already exists in SQLite
+                pass
 
 
 async def init_db() -> None:
     from app import models  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _ensure_backward_compatible_columns(conn)
+    await _ensure_backward_compatible_columns()
 
 
 async def get_db():
