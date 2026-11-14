@@ -48,13 +48,23 @@ class TokenTracker:
         success: bool = True,
         is_live_api: bool = True,
         error_message: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         total_tokens = input_tokens + output_tokens
         cost_usd = estimate_cost_usd(model_id, input_tokens, output_tokens, is_live_api=is_live_api)
 
+        wf_res = await session.execute(
+            select(WorkforceModel).where(WorkforceModel.id == workforce_id)
+        )
+        workforce = wf_res.scalar_one_or_none()
+        ws_id = workspace_id or (workforce.workspace_id if workforce else None)
+        usr_id = workforce.user_id if workforce else None
+
         req_record = LLMRequestModel(
             id=f"req_{uuid.uuid4().hex[:10]}",
             workforce_id=workforce_id,
+            user_id=usr_id,
+            workspace_id=ws_id,
             agent_id=agent_id,
             model_id=model_id,
             operation=operation,
@@ -69,10 +79,6 @@ class TokenTracker:
         )
         session.add(req_record)
 
-        wf_res = await session.execute(
-            select(WorkforceModel).where(WorkforceModel.id == workforce_id)
-        )
-        workforce = wf_res.scalar_one_or_none()
         if workforce and success:
             workforce.tokens_used = (workforce.tokens_used or 0) + total_tokens
             workforce.llm_calls_made = (workforce.llm_calls_made or 0) + 1
@@ -92,11 +98,13 @@ class TokenTracker:
                 TokenUsageModel.model_id == model_id,
             )
         )
-        usage_row = usage_res.scalar_one_or_none()
+        usage_row = usage_res.scalars().first()
         if not usage_row:
             usage_row = TokenUsageModel(
                 id=f"tu_{uuid.uuid4().hex[:10]}",
                 workforce_id=workforce_id,
+                user_id=usr_id,
+                workspace_id=ws_id,
                 agent_id=agent_id,
                 model_id=model_id,
                 input_tokens=input_tokens if success else 0,
@@ -115,6 +123,7 @@ class TokenTracker:
         return {
             "request_id": req_record.id,
             "workforce_id": workforce_id,
+            "workspace_id": ws_id,
             "agent_id": agent_id,
             "model_id": model_id,
             "operation": operation,

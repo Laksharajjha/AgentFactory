@@ -37,6 +37,7 @@ class AgentRegistry:
             agent = AgentModel(
                 id=agent_id,
                 workforce_id=workforce.id,
+                workspace_id=workforce.workspace_id,
                 agent_key=bp["agent_key"],
                 name=bp["name"],
                 role=bp["role"],

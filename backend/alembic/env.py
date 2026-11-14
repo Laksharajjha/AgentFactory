@@ -11,7 +11,10 @@ from app import models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    try:
+        fileConfig(config.config_file_name)
+    except Exception:
+        pass
 
 config.set_main_option("sqlalchemy.url", settings.effective_database_url)
 target_metadata = Base.metadata
@@ -32,6 +35,8 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
+        if connection.dialect.name == "postgresql":
+            connection.exec_driver_sql("SELECT set_config('app.bypass_rls', 'true', true)")
         context.run_migrations()
 
 

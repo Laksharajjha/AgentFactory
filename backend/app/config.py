@@ -2,20 +2,30 @@ import hashlib
 import os
 import urllib.parse
 from pathlib import Path
+from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+UNSAFE_SECRET_DEFAULTS = {
+    "",
+    "changeme",
+    "secret",
+    "forge-3-enterprise-hmac-secret-key-change-in-production-2026",
+    "forge-3-credential-encryption-seed-key-2026",
+}
 
 
 class Settings(BaseSettings):
     # Environment & Service Identity
     ENVIRONMENT: str = "development"
     APP_VERSION: str = "3.0.0"
+    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173"
 
     # Gemini AI & Free-Tier Quota Protection
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3.1-flash-lite-preview"
-    GEMINI_COMPLEX_MODEL: str = "gemini-3.1-flash-lite-preview"
+    GEMINI_MODEL: str = "gemini-3.1-flash-lite"
+    GEMINI_COMPLEX_MODEL: str = "gemini-3.1-flash-lite"
     ENABLE_COMPLEX_MODEL: bool = False
     MAX_AGENT_ITERATIONS: int = 2
     MAX_WORKFORCE_CALLS: int = 25
@@ -33,9 +43,9 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE_SECONDS: int = 300
     ENABLE_RLS: bool = True
 
-    # Authentication, Session & Encryption Secrets
-    AUTH_SECRET_KEY: str = "forge-3-enterprise-hmac-secret-key-change-in-production-2026"
-    CREDENTIAL_ENCRYPTION_KEY: str = "forge-3-credential-encryption-seed-key-2026"
+    # Authentication, Session & Encryption Secrets (Must be configured in backend/.env; unsafe defaults rejected)
+    AUTH_SECRET_KEY: str = ""
+    CREDENTIAL_ENCRYPTION_KEY: str = ""
     SESSION_EXPIRY_HOURS: int = 72
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
@@ -86,6 +96,29 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @property
+    def allowed_cors_origins(self) -> List[str]:
+        origins = [
+            o.strip().rstrip("/")
+            for o in (self.CORS_ORIGINS or "").split(",")
+            if o.strip() and o.strip() != "*"
+        ]
+        return origins or ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    def validate_security_secrets(self) -> None:
+        auth_key = (self.AUTH_SECRET_KEY or "").strip()
+        enc_key = (self.CREDENTIAL_ENCRYPTION_KEY or "").strip()
+        if auth_key in UNSAFE_SECRET_DEFAULTS or len(auth_key) < 32:
+            raise RuntimeError(
+                "Security configuration error: AUTH_SECRET_KEY is missing, shorter than 32 characters, "
+                "or set to a known unsafe default."
+            )
+        if enc_key in UNSAFE_SECRET_DEFAULTS or len(enc_key) < 32:
+            raise RuntimeError(
+                "Security configuration error: CREDENTIAL_ENCRYPTION_KEY is missing, shorter than 32 characters, "
+                "or set to a known unsafe default."
+            )
+
     @staticmethod
     def _normalize_postgres_url(raw_url: str) -> str:
         url = raw_url.strip()
@@ -119,8 +152,10 @@ class Settings(BaseSettings):
 
     def derive_fernet_key(self) -> bytes:
         import base64
+        self.validate_security_secrets()
         digest = hashlib.sha256(self.CREDENTIAL_ENCRYPTION_KEY.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest)
 
 
 settings = Settings()
+settings.validate_security_secrets()

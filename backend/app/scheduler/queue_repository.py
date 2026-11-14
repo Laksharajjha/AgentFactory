@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import privileged_rls_context
 from app.models import ExecutionLeaseModel, ExecutionModel, ExecutionQueueModel
 
 
@@ -10,12 +11,13 @@ class QueueRepository:
 
     @staticmethod
     async def get_queue_position(session: AsyncSession, execution_id: str) -> Optional[int]:
-        res = await session.execute(
-            select(ExecutionQueueModel)
-            .where(ExecutionQueueModel.status == "QUEUED")
-            .order_by(ExecutionQueueModel.queued_at.asc())
-        )
-        items = list(res.scalars().all())
+        async with privileged_rls_context(session):
+            res = await session.execute(
+                select(ExecutionQueueModel)
+                .where(ExecutionQueueModel.status == "QUEUED")
+                .order_by(ExecutionQueueModel.queued_at.asc())
+            )
+            items = list(res.scalars().all())
         for idx, item in enumerate(items, start=1):
             if item.execution_id == execution_id:
                 return idx
@@ -26,10 +28,11 @@ class QueueRepository:
         session: AsyncSession,
         workspace_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        res = await session.execute(
-            select(ExecutionQueueModel).order_by(ExecutionQueueModel.queued_at.desc()).limit(40)
-        )
-        all_rows = list(res.scalars().all())
+        async with privileged_rls_context(session):
+            res = await session.execute(
+                select(ExecutionQueueModel).order_by(ExecutionQueueModel.queued_at.desc()).limit(40)
+            )
+            all_rows = list(res.scalars().all())
 
         queued_ordered = sorted(
             [r for r in all_rows if r.status == "QUEUED"],

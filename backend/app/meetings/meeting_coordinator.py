@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.agent_memory import AgentMemoryManager
 from app.agents.state_manager import StateManager
 from app.events.event_bus import event_bus
-from app.llm.gemini_provider import gemini_provider
+from app.llm.provider_resolver import WorkspaceProviderResolver
 from app.models import (
     AgentModel,
     MeetingDecisionModel,
@@ -18,6 +18,7 @@ from app.models import (
     MeetingParticipantModel,
     MeetingPresentationModel,
     TaskModel,
+    WorkforceModel,
 )
 from app.schemas import PresentationTypeLiteral
 from app.world.layout import ROOM_MAP
@@ -76,6 +77,7 @@ class MeetingCoordinator:
         meeting = MeetingModel(
             id=meeting_id,
             workforce_id=workforce_id,
+            workspace_id=initiator.workspace_id,
             title=title,
             agenda=agenda,
             room_id="boardroom",
@@ -188,7 +190,21 @@ class MeetingCoordinator:
 
         fallback_meeting_data = MeetingCoordinator._build_boardroom_fallback(objective, project_summary)
 
-        synthesis, telemetry = await gemini_provider.generate_structured(
+        ws_id = initiator.workspace_id
+        if not ws_id:
+            from sqlalchemy import select
+            wf_row = (
+                await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
+            ).scalar_one_or_none()
+            ws_id = wf_row.workspace_id if wf_row else "ws_forge_default"
+
+        provider_instance = await WorkspaceProviderResolver.resolve_for_workspace(
+            session=session,
+            workspace_id=ws_id or "ws_forge_default",
+            provider="gemini",
+        )
+
+        synthesis, telemetry = await provider_instance.generate_structured(
             session=session,
             workforce_id=workforce_id,
             agent_id=initiator.id,
@@ -365,6 +381,7 @@ class MeetingCoordinator:
             followup_task = TaskModel(
                 id=f"tsk_{uuid.uuid4().hex[:8]}",
                 workforce_id=workforce_id,
+                workspace_id=owner.workspace_id or initiator.workspace_id,
                 title=f"Follow-up: {dec_spec.title}",
                 description=f"Execute boardroom action items: {'; '.join(dec_spec.action_items)}",
                 assigned_agent_id=owner.id,

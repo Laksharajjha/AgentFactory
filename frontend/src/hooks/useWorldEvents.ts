@@ -7,6 +7,7 @@ import { WorldSnapshot } from '../types/world';
 
 export function useWorldEvents() {
   const workforceId = useWorldStore((s) => s.workforceId);
+  const authToken = useWorldStore((s) => s.authToken);
   const setSnapshot = useWorldStore((s) => s.setSnapshot);
   const applyWorldEvent = useWorldStore((s) => s.applyWorldEvent);
   const fetchSnapshot = useWorldStore((s) => s.fetchSnapshot);
@@ -15,16 +16,23 @@ export function useWorldEvents() {
   const reconnectTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    void fetchSnapshot();
-  }, [fetchSnapshot]);
+    if (authToken) {
+      void fetchSnapshot();
+    }
+  }, [authToken, fetchSnapshot]);
 
   useEffect(() => {
+    if (!authToken) {
+      setWsConnected(false);
+      return;
+    }
+
     let isMounted = true;
 
     const connect = () => {
-      if (!isMounted) return;
+      if (!isMounted || !authToken) return;
       const targetId = workforceId || 'current';
-      const wsUrl = `${WS_BASE_URL}/ws/world/${encodeURIComponent(targetId)}`;
+      const wsUrl = `${WS_BASE_URL}/ws/world/${encodeURIComponent(targetId)}?token=${encodeURIComponent(authToken)}`;
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -70,5 +78,5 @@ export function useWorldEvents() {
         wsRef.current.close();
       }
     };
-  }, [workforceId, setSnapshot, applyWorldEvent, setWsConnected]);
+  }, [workforceId, authToken, setSnapshot, applyWorldEvent, setWsConnected]);
 }

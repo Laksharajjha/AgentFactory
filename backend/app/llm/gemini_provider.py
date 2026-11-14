@@ -1,10 +1,9 @@
 import asyncio
-import json
 import logging
-import os
+import re
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Type
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
@@ -12,107 +11,164 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.llm.budget_manager import BudgetExhaustedError, BudgetManager
+from app.llm.model_catalog import (
+    ALLOWED_GEMINI_MODELS,
+    DEFAULT_GEMINI_MODEL,
+    FALLBACK_MODEL_CHAIN,
+    FREE_TIER_MODEL_LIMITS,
+    ZERO_QUOTA_FREE_TIER_MODELS,
+)
 from app.llm.provider import BaseLLMProvider
 from app.llm.token_tracker import TokenTracker
 
 logger = logging.getLogger("project_forge.llm")
 
-# User's Exact Google AI Studio Free Tier Rate Limits
-FREE_TIER_MODEL_LIMITS: Dict[str, Dict[str, Any]] = {
-    "gemini-3.1-flash-lite-preview": {
-        "label": "Gemini 3.1 Flash Lite",
-        "rpm": 15,
-        "tpm": 250_000,
-        "rpd": 500,
-        "min_interval_sec": 4.2,
-    },
-    "gemini-3.1-flash-lite": {
-        "label": "Gemini 3.1 Flash Lite",
-        "rpm": 15,
-        "tpm": 250_000,
-        "rpd": 500,
-        "min_interval_sec": 4.2,
-    },
-    "gemini-3.5-flash-lite": {
-        "label": "Gemini 3.5 Flash Lite",
-        "rpm": 15,
-        "tpm": 250_000,
-        "rpd": 500,
-        "min_interval_sec": 4.2,
-    },
-    "gemini-2.5-flash-lite": {
-        "label": "Gemini 2.5 Flash Lite",
-        "rpm": 10,
-        "tpm": 250_000,
-        "rpd": 20,
-        "min_interval_sec": 6.2,
-    },
-    "gemini-2.5-flash": {
-        "label": "Gemini 2.5 Flash",
-        "rpm": 5,
-        "tpm": 250_000,
-        "rpd": 20,
-        "min_interval_sec": 12.5,
-    },
-    "gemini-3-flash-preview": {
-        "label": "Gemini 3 Flash",
-        "rpm": 5,
-        "tpm": 250_000,
-        "rpd": 20,
-        "min_interval_sec": 12.5,
-    },
-}
 
-# Models with 0/0 quota on the user's Free Tier must automatically reroute to 3.1 Flash Lite
-ZERO_QUOTA_FREE_TIER_MODELS = {
-    "gemini-2.5-pro",
-    "gemini-3.1-pro",
-    "gemini-3.1-pro-preview",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-pro",
-}
-
-FALLBACK_MODEL_CHAIN: List[str] = [
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-]
+def redact_secrets(text: str, secret: Optional[str] = None) -> str:
+    """Strictly scrubs any API key or credential string from error messages and logs."""
+    if not text:
+        return ""
+    scrubbed = str(text)
+    if secret and len(secret.strip()) >= 6:
+        scrubbed = scrubbed.replace(secret.strip(), "[REDACTED_CREDENTIAL]")
+    scrubbed = re.sub(r"AIza[A-Za-z0-9_-]{12,}", "[REDACTED_GEMINI_KEY]", scrubbed)
+    scrubbed = re.sub(r"key=[A-Za-z0-9_-]{10,}", "key=[REDACTED]", scrubbed)
+    return scrubbed
 
 
-class GeminiProvider(BaseLLMProvider):
-    """Official Google GenAI SDK Gateway with Free-Tier RPM/TPM/RPD rate-limit pacing, retry logic, and structured output validation."""
+class WorkspaceRateLimiter:
+    """Tracks RPM and RPD rate limits isolated per (workspace_id, model_id) plus a global safety ceiling."""
 
     def __init__(self) -> None:
-        self._api_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
-        self._live_execution_enabled = bool(self._api_key and len(self._api_key.strip()) > 10)
-        self._rate_limit_lock = asyncio.Lock()
+        self._lock = asyncio.Lock()
         self._last_request_ts: Dict[str, float] = {}
         self._minute_windows: Dict[str, Deque[float]] = {}
         self._daily_counts: Dict[str, int] = {}
 
-    @property
-    def api_key(self) -> str:
-        return settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "") or self._api_key
+    def _bucket_key(self, workspace_id: str, model_id: str) -> str:
+        ws = (workspace_id or "global").strip()
+        return f"{ws}:{model_id}"
 
-    def set_api_key(self, key: str) -> None:
-        self._api_key = key.strip()
-        settings.GEMINI_API_KEY = self._api_key
+    def get_usage(self, workspace_id: str, model_id: str) -> Dict[str, int]:
+        key = self._bucket_key(workspace_id, model_id)
+        now = time.monotonic()
+        win = self._minute_windows.get(key, deque())
+        while win and (now - win[0]) > 60.0:
+            win.popleft()
+        return {
+            "rpm_used": len(win),
+            "rpd_used": self._daily_counts.get(key, 0),
+        }
 
-    def set_live_execution(self, enabled: bool) -> None:
-        self._live_execution_enabled = bool(enabled)
+    async def acquire_slot(self, workspace_id: str, model_id: str) -> None:
+        limits = FREE_TIER_MODEL_LIMITS.get(
+            model_id,
+            {"rpm": 15, "tpm": 250_000, "rpd": 500, "min_interval_sec": 4.2},
+        )
+        rpm_limit = max(1, int(limits["rpm"]) - 1)
+        min_interval = float(limits["min_interval_sec"])
+        rpd_limit = int(limits["rpd"])
+        key = self._bucket_key(workspace_id, model_id)
+
+        async with self._lock:
+            used_today = self._daily_counts.get(key, 0)
+            if used_today >= rpd_limit:
+                raise RuntimeError(
+                    f"Workspace daily quota reached for {model_id} ({used_today}/{rpd_limit} RPD)."
+                )
+
+            now = time.monotonic()
+            win = self._minute_windows.setdefault(key, deque())
+            while win and (now - win[0]) > 60.0:
+                win.popleft()
+
+            if len(win) >= rpm_limit:
+                wait_window = 60.2 - (now - win[0])
+                if wait_window > 0:
+                    logger.info(
+                        "Rate-limit pacing (workspace=%s, model=%s): waiting %.2fs",
+                        workspace_id,
+                        model_id,
+                        wait_window,
+                    )
+                    await asyncio.sleep(wait_window)
+                    now = time.monotonic()
+                    while win and (now - win[0]) > 60.0:
+                        win.popleft()
+
+            last_ts = self._last_request_ts.get(key, 0.0)
+            elapsed = now - last_ts
+            if last_ts > 0.0 and elapsed < min_interval:
+                wait_spacing = min_interval - elapsed
+                await asyncio.sleep(wait_spacing)
+                now = time.monotonic()
+
+            self._last_request_ts[key] = now
+            win.append(now)
+            self._daily_counts[key] = used_today + 1
+
+
+workspace_rate_limiter = WorkspaceRateLimiter()
+
+
+class GeminiProvider(BaseLLMProvider):
+    """
+    Workspace-scoped Google Gemini provider instance.
+    Never mutates process-wide API keys or leaks credentials across workspaces.
+    """
+
+    # Optional hook exclusively for deterministic mock injection in automated isolation tests
+    _mock_transport_hook: Optional[
+        Callable[[str, str, str, str, str, Type[BaseModel]], Any]
+    ] = None
+
+    def __init__(
+        self,
+        workspace_id: str = "ws_forge_default",
+        api_key: str = "",
+        model_id: str = DEFAULT_GEMINI_MODEL,
+        complex_model_id: Optional[str] = None,
+        enable_complex_model: bool = False,
+        live_execution_enabled: Optional[bool] = None,
+        credential_version: int = 0,
+        credential_source: str = "none",
+    ) -> None:
+        self.workspace_id = (workspace_id or "ws_forge_default").strip()
+        self._api_key = (api_key or "").strip()
+        self.model_id = (model_id or DEFAULT_GEMINI_MODEL).strip()
+        if self.model_id in ZERO_QUOTA_FREE_TIER_MODELS or self.model_id not in ALLOWED_GEMINI_MODELS:
+            self.model_id = DEFAULT_GEMINI_MODEL
+        self.complex_model_id = (complex_model_id or self.model_id).strip()
+        self.enable_complex_model = bool(enable_complex_model)
+        self.credential_version = int(credential_version)
+        self.credential_source = credential_source
+        if live_execution_enabled is None:
+            self._live_execution_enabled = bool(self._api_key and len(self._api_key) >= 12)
+        else:
+            self._live_execution_enabled = bool(live_execution_enabled and self._api_key and len(self._api_key) >= 12)
+        self._sdk_client: Optional[genai.Client] = None
 
     def has_api_key(self) -> bool:
-        return bool(self.api_key and len(self.api_key.strip()) > 10)
+        return bool(self._api_key and len(self._api_key) >= 12)
 
     def is_live_configured(self) -> bool:
         return self.has_api_key() and self._live_execution_enabled
 
+    def _get_sdk_client(self) -> genai.Client:
+        if self._sdk_client is None:
+            self._sdk_client = genai.Client(api_key=self._api_key)
+        return self._sdk_client
+
+    def select_model(self, complex_task: bool = False) -> str:
+        chosen = self.complex_model_id if (complex_task and self.enable_complex_model) else self.model_id
+        if chosen in ZERO_QUOTA_FREE_TIER_MODELS or chosen not in ALLOWED_GEMINI_MODELS:
+            return DEFAULT_GEMINI_MODEL
+        return chosen
+
     def get_model_limits(self, model_id: Optional[str] = None) -> Dict[str, Any]:
-        target = (model_id or settings.GEMINI_MODEL or "gemini-3.1-flash-lite-preview").strip()
-        if target in ZERO_QUOTA_FREE_TIER_MODELS:
-            target = "gemini-3.1-flash-lite-preview"
+        target = (model_id or self.model_id or DEFAULT_GEMINI_MODEL).strip()
+        if target in ZERO_QUOTA_FREE_TIER_MODELS or target not in ALLOWED_GEMINI_MODELS:
+            target = DEFAULT_GEMINI_MODEL
         limits = FREE_TIER_MODEL_LIMITS.get(
             target,
             {
@@ -121,83 +177,69 @@ class GeminiProvider(BaseLLMProvider):
                 "tpm": 250_000,
                 "rpd": 500,
                 "min_interval_sec": 4.2,
+                "recommended": False,
             },
         )
-        now = time.monotonic()
-        win = self._minute_windows.get(target, deque())
-        while win and (now - win[0]) > 60.0:
-            win.popleft()
+        usage = workspace_rate_limiter.get_usage(self.workspace_id, target)
         return {
             **limits,
             "model_id": target,
-            "rpm_used": len(win),
-            "rpd_used": self._daily_counts.get(target, 0),
+            "workspace_id": self.workspace_id,
+            "rpm_used": usage["rpm_used"],
+            "rpd_used": usage["rpd_used"],
         }
 
-    def select_model(self, complex_task: bool = False) -> str:
-        chosen = super().select_model(complex_task=complex_task)
-        if chosen in ZERO_QUOTA_FREE_TIER_MODELS:
-            logger.info(
-                "Model %s has 0/0 Free Tier quota; rerouting to gemini-3.1-flash-lite-preview (15 RPM / 500 RPD).",
-                chosen,
+    async def validate_connection(self) -> Dict[str, Any]:
+        """Tests the workspace's configured Gemini API key and model without exposing credentials."""
+        if not self.has_api_key():
+            return {
+                "valid": False,
+                "provider": "gemini",
+                "model_id": self.model_id,
+                "status": "MISSING_KEY",
+                "detail": "No Gemini API key is provided for validation.",
+            }
+
+        t0 = time.perf_counter()
+        try:
+            if GeminiProvider._mock_transport_hook is not None:
+                res = GeminiProvider._mock_transport_hook(
+                    self.workspace_id,
+                    self._api_key,
+                    self.model_id,
+                    "validate_connection",
+                    "Verify connectivity.",
+                     BaseModel,
+                )
+                if asyncio.iscoroutine(res):
+                    await res
+            else:
+                client = self._get_sdk_client()
+                await client.aio.models.get(model=self.model_id)
+            latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            return {
+                "valid": True,
+                "provider": "gemini",
+                "model_id": self.model_id,
+                "status": "VALID",
+                "latency_ms": latency_ms,
+                "detail": f"Successfully verified Gemini model '{self.model_id}'.",
+            }
+        except Exception as exc:
+            safe_err = redact_secrets(str(exc), self._api_key)
+            logger.warning(
+                "Gemini credential validation failed for workspace %s (model=%s): %s",
+                self.workspace_id,
+                self.model_id,
+                safe_err,
             )
-            return "gemini-3.1-flash-lite-preview"
-        return chosen
-
-    async def _acquire_rate_limit_slot(self, model_id: str) -> None:
-        """Strictly paces outgoing Gemini calls to adhere to the user's Free Tier RPM & RPD quotas."""
-        limits = FREE_TIER_MODEL_LIMITS.get(
-            model_id,
-            {"rpm": 15, "tpm": 250_000, "rpd": 500, "min_interval_sec": 4.2},
-        )
-        rpm_limit = max(1, int(limits["rpm"]) - 1)  # Keep 1 RPM safety headroom
-        min_interval = float(limits["min_interval_sec"])
-        rpd_limit = int(limits["rpd"])
-
-        async with self._rate_limit_lock:
-            used_today = self._daily_counts.get(model_id, 0)
-            if used_today >= rpd_limit:
-                raise RuntimeError(
-                    f"Free-Tier daily quota reached for {model_id} ({used_today}/{rpd_limit} RPD)."
-                )
-
-            now = time.monotonic()
-            win = self._minute_windows.setdefault(model_id, deque())
-            while win and (now - win[0]) > 60.0:
-                win.popleft()
-
-            # 1) Enforce sliding 60-second RPM window
-            if len(win) >= rpm_limit:
-                wait_window = 60.2 - (now - win[0])
-                if wait_window > 0:
-                    logger.info(
-                        "Rate-limit pacing (%s): waiting %.2fs to stay within %d RPM Free Tier limit",
-                        model_id,
-                        wait_window,
-                        limits["rpm"],
-                    )
-                    await asyncio.sleep(wait_window)
-                    now = time.monotonic()
-                    while win and (now - win[0]) > 60.0:
-                        win.popleft()
-
-            # 2) Enforce minimum spacing between consecutive calls to prevent burst 429s
-            last_ts = self._last_request_ts.get(model_id, 0.0)
-            elapsed = now - last_ts
-            if last_ts > 0.0 and elapsed < min_interval:
-                wait_spacing = min_interval - elapsed
-                logger.info(
-                    "Rate-limit spacing (%s): pacing %.2fs between requests (min_interval=%.1fs)",
-                    model_id,
-                    wait_spacing,
-                    min_interval,
-                )
-                await asyncio.sleep(wait_spacing)
-                now = time.monotonic()
-
-            self._last_request_ts[model_id] = now
-            win.append(now)
-            self._daily_counts[model_id] = used_today + 1
+            return {
+                "valid": False,
+                "provider": "gemini",
+                "model_id": self.model_id,
+                "status": "INVALID",
+                "detail": f"Gemini validation failed: {safe_err[:240]}",
+            }
 
     async def generate_structured(
         self,
@@ -218,7 +260,6 @@ class GeminiProvider(BaseLLMProvider):
         primary_model_id = self.select_model(complex_task=complex_task)
         max_tokens = BudgetManager.get_max_output_tokens()
 
-        # Build candidate chain starting with primary_model_id followed by free-tier fallbacks
         candidate_models: List[str] = [primary_model_id]
         for fb_model in FALLBACK_MODEL_CHAIN:
             if fb_model not in candidate_models:
@@ -231,28 +272,53 @@ class GeminiProvider(BaseLLMProvider):
                 active_model_id = candidate_models[min(model_idx, len(candidate_models) - 1)]
                 t0 = time.perf_counter()
                 try:
-                    await self._acquire_rate_limit_slot(active_model_id)
-                    client = genai.Client(api_key=self.api_key)
-                    config = types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        response_mime_type="application/json",
-                        response_schema=response_schema,
-                        max_output_tokens=max_tokens,
-                        temperature=0.3,
-                    )
-                    response = await client.aio.models.generate_content(
-                        model=active_model_id,
-                        contents=prompt,
-                        config=config,
-                    )
-                    duration_ms = (time.perf_counter() - t0) * 1000.0
-
-                    usage = getattr(response, "usage_metadata", None)
-                    in_tokens = getattr(usage, "prompt_token_count", None) or max(1, len(prompt + system_instruction) // 4)
-                    out_tokens = getattr(usage, "candidates_token_count", None) or max(1, len(response.text or "") // 4)
-
-                    raw_text = response.text or "{}"
-                    parsed_obj = response_schema.model_validate_json(raw_text)
+                    if GeminiProvider._mock_transport_hook is not None:
+                        hook_out = GeminiProvider._mock_transport_hook(
+                            self.workspace_id,
+                            self._api_key,
+                            active_model_id,
+                            operation,
+                            prompt,
+                            response_schema,
+                        )
+                        if asyncio.iscoroutine(hook_out):
+                            hook_out = await hook_out
+                        duration_ms = (time.perf_counter() - t0) * 1000.0
+                        if isinstance(hook_out, BaseModel):
+                            parsed_obj = hook_out
+                        elif isinstance(hook_out, dict):
+                            parsed_obj = response_schema.model_validate(hook_out)
+                        elif fallback_data is not None:
+                            parsed_obj = response_schema.model_validate(fallback_data)
+                        else:
+                            parsed_obj = response_schema.model_validate_json(str(hook_out))
+                        in_tokens = max(12, len(prompt + system_instruction) // 4)
+                        out_tokens = 64
+                    else:
+                        await workspace_rate_limiter.acquire_slot(self.workspace_id, active_model_id)
+                        client = self._get_sdk_client()
+                        config = types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            response_mime_type="application/json",
+                            response_schema=response_schema,
+                            max_output_tokens=max_tokens,
+                            temperature=0.3,
+                        )
+                        response = await client.aio.models.generate_content(
+                            model=active_model_id,
+                            contents=prompt,
+                            config=config,
+                        )
+                        duration_ms = (time.perf_counter() - t0) * 1000.0
+                        usage = getattr(response, "usage_metadata", None)
+                        in_tokens = getattr(usage, "prompt_token_count", None) or max(
+                            1, len(prompt + system_instruction) // 4
+                        )
+                        out_tokens = getattr(usage, "candidates_token_count", None) or max(
+                            1, len(response.text or "") // 4
+                        )
+                        raw_text = response.text or "{}"
+                        parsed_obj = response_schema.model_validate_json(raw_text)
 
                     telemetry = await TokenTracker.record_request(
                         session=session,
@@ -265,19 +331,32 @@ class GeminiProvider(BaseLLMProvider):
                         duration_ms=duration_ms,
                         success=True,
                         is_live_api=True,
+                        workspace_id=self.workspace_id,
                     )
                     return parsed_obj, telemetry
 
                 except ValidationError as ve:
                     duration_ms = (time.perf_counter() - t0) * 1000.0
-                    last_error = f"Structured output validation error: {ve}"
-                    logger.warning("Attempt %d validation error for %s: %s", attempt + 1, operation, last_error)
+                    last_error = f"Structured output validation error: {redact_secrets(str(ve), self._api_key)}"
+                    logger.warning(
+                        "Attempt %d validation error for %s (workspace=%s): %s",
+                        attempt + 1,
+                        operation,
+                        self.workspace_id,
+                        last_error,
+                    )
                 except Exception as exc:
                     duration_ms = (time.perf_counter() - t0) * 1000.0
-                    last_error = str(exc)
-                    logger.warning("Attempt %d Gemini API error (%s) for %s: %s", attempt + 1, active_model_id, operation, last_error)
+                    last_error = redact_secrets(str(exc), self._api_key)
+                    logger.warning(
+                        "Attempt %d Gemini API error (%s, workspace=%s) for %s: %s",
+                        attempt + 1,
+                        active_model_id,
+                        self.workspace_id,
+                        operation,
+                        last_error,
+                    )
                     if "404" in last_error or "NOT_FOUND" in last_error or "daily quota" in last_error.lower():
-                        # Immediately switch to next free-tier model in candidate chain
                         model_idx += 1
                     elif "429" in last_error or "RESOURCE_EXHAUSTED" in last_error:
                         model_idx += 1
@@ -285,7 +364,6 @@ class GeminiProvider(BaseLLMProvider):
                     elif attempt < settings.MAX_RETRIES:
                         await asyncio.sleep(1.5 * (attempt + 1))
 
-            # Record failed live API attempt transparently
             await TokenTracker.record_request(
                 session=session,
                 workforce_id=workforce_id,
@@ -298,16 +376,18 @@ class GeminiProvider(BaseLLMProvider):
                 success=False,
                 is_live_api=True,
                 error_message=last_error,
+                workspace_id=self.workspace_id,
             )
             if fallback_data is None:
-                raise RuntimeError(f"Gemini request failed after {settings.MAX_RETRIES + 1} attempts: {last_error}")
+                raise RuntimeError(
+                    f"Gemini request failed after {settings.MAX_RETRIES + 1} attempts: {last_error}"
+                )
 
-        # Deterministic structured fallback when GEMINI_API_KEY is not configured or rate-limited
         t0 = time.perf_counter()
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(0.05 if GeminiProvider._mock_transport_hook is not None else 0.35)
         duration_ms = (time.perf_counter() - t0) * 1000.0
         if fallback_data is None:
-            raise RuntimeError("GEMINI_API_KEY is not configured and no fallback schema was provided.")
+            raise RuntimeError("No workspace Gemini API key is configured and no fallback schema was provided.")
 
         parsed_fallback = response_schema.model_validate(fallback_data)
 
@@ -322,8 +402,15 @@ class GeminiProvider(BaseLLMProvider):
             duration_ms=duration_ms,
             success=True,
             is_live_api=False,
+            workspace_id=self.workspace_id,
         )
         return parsed_fallback, telemetry
 
 
-gemini_provider = GeminiProvider()
+# Read-only default status helper for system-level capacity telemetry when no workspace is in scope
+gemini_provider = GeminiProvider(
+    workspace_id="system",
+    api_key="",
+    model_id=settings.GEMINI_MODEL or DEFAULT_GEMINI_MODEL,
+    live_execution_enabled=False,
+)

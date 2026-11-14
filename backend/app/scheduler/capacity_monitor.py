@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import privileged_rls_context
 from app.events.event_bus import event_bus
 from app.llm.gemini_provider import gemini_provider
 from app.models import (
@@ -35,40 +36,41 @@ class CapacityMonitor:
 
     @classmethod
     async def get_system_capacity(cls, session: AsyncSession) -> Dict[str, Any]:
-        total_users = (await session.execute(select(func.count()).select_from(UserModel))).scalar_one() or 0
-        active_sessions = (
-            await session.execute(
-                select(func.count()).select_from(SessionModel).where(SessionModel.is_revoked == False)  # noqa: E712
-            )
-        ).scalar_one() or 0
+        async with privileged_rls_context(session):
+            total_users = (await session.execute(select(func.count()).select_from(UserModel))).scalar_one() or 0
+            active_sessions = (
+                await session.execute(
+                    select(func.count()).select_from(SessionModel).where(SessionModel.is_revoked == False)  # noqa: E712
+                )
+            ).scalar_one() or 0
 
-        running_execs = (
-            await session.execute(
-                select(func.count())
-                .select_from(ExecutionLeaseModel)
-                .where(ExecutionLeaseModel.status == "ACTIVE")
-            )
-        ).scalar_one() or 0
+            running_execs = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ExecutionLeaseModel)
+                    .where(ExecutionLeaseModel.status == "ACTIVE")
+                )
+            ).scalar_one() or 0
 
-        queued_execs = (
-            await session.execute(
-                select(func.count())
-                .select_from(ExecutionQueueModel)
-                .where(ExecutionQueueModel.status == "QUEUED")
-            )
-        ).scalar_one() or 0
+            queued_execs = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ExecutionQueueModel)
+                    .where(ExecutionQueueModel.status == "QUEUED")
+                )
+            ).scalar_one() or 0
 
-        active_agent_tasks = (
-            await session.execute(
-                select(func.count())
-                .select_from(AgentModel)
-                .where(AgentModel.state.in_(["WORKING", "PLANNING", "MOVING", "IN_MEETING", "PRESENTING"]))
-            )
-        ).scalar_one() or 0
+            active_agent_tasks = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(AgentModel)
+                    .where(AgentModel.state.in_(["WORKING", "PLANNING", "MOVING", "IN_MEETING", "PRESENTING"]))
+                )
+            ).scalar_one() or 0
 
-        total_storage_bytes = (
-            await session.execute(select(func.coalesce(func.sum(ArtifactModel.file_size), 0)))
-        ).scalar_one() or 0
+            total_storage_bytes = (
+                await session.execute(select(func.coalesce(func.sum(ArtifactModel.file_size), 0)))
+            ).scalar_one() or 0
 
         ws_conns = sum(len(s) for s in event_bus._connections.values())
         proc = cls._get_process_metrics()

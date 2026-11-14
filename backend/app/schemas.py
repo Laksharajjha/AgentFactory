@@ -320,7 +320,30 @@ class SimulationControlRequest(BaseModel):
 
 
 class LLMConfigUpdateRequest(BaseModel):
+    provider: str = "gemini"
+    workspace_id: Optional[str] = None
     gemini_api_key: Optional[str] = None
+    api_key: Optional[str] = None
+    gemini_model: Optional[str] = None
+    selected_model: Optional[str] = None
+    enable_complex_model: Optional[bool] = None
+    enable_live_execution: Optional[bool] = None
+    validate_before_save: bool = False
+
+
+class LLMTestCredentialRequest(BaseModel):
+    provider: str = "gemini"
+    workspace_id: Optional[str] = None
+    api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    selected_model: Optional[str] = None
+    gemini_model: Optional[str] = None
+
+
+class LLMModelSelectionRequest(BaseModel):
+    provider: str = "gemini"
+    workspace_id: Optional[str] = None
+    selected_model: Optional[str] = None
     gemini_model: Optional[str] = None
     enable_complex_model: Optional[bool] = None
     enable_live_execution: Optional[bool] = None

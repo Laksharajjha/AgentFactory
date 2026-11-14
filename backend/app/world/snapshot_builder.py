@@ -11,7 +11,7 @@ from app.artifacts.artifact_manager import ArtifactManager
 from app.auth.auth_service import AuthService
 from app.config import settings
 from app.integrations.github_service import GitHubService
-from app.llm.gemini_provider import gemini_provider
+from app.llm.provider_resolver import WorkspaceProviderResolver
 from app.models import (
     AgentEventModel,
     AgentModel,
@@ -374,11 +374,17 @@ class SnapshotBuilder:
             for r in requests[:20]
         ]
 
-        limits = gemini_provider.get_model_limits(settings.GEMINI_MODEL)
+        ws_id = workforce.workspace_id or "ws_forge_default"
+        prov_instance = await WorkspaceProviderResolver.resolve_for_workspace(
+            session=session,
+            workspace_id=ws_id,
+            provider="gemini",
+        )
+        limits = prov_instance.get_model_limits()
         provider_status = (
             f"LIVE GEMINI MODE: Paced to Free Tier ({limits['rpm']} RPM • 250K TPM • {limits['rpd']} RPD | Today: {limits['rpd_used']}/{limits['rpd']} RPD)"
-            if gemini_provider.is_live_configured()
-            else f"DEMO MODE: No API key configured. Free Tier Ready ({limits['label']}: {limits['rpm']} RPM • {limits['rpd']} RPD)."
+            if prov_instance.is_live_configured()
+            else f"DEMO MODE: No workspace API key configured. Free Tier Ready ({limits['label']}: {limits['rpm']} RPM • {limits['rpd']} RPD)."
         )
 
         return TokenUsageSummarySchema(

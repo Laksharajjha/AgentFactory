@@ -1,8 +1,27 @@
-from typing import Any, Optional, Set
+from typing import Any, Optional, Set, Type
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.auth_service import AuthenticatedContext, AuthService
+from app.database import privileged_rls_context
+from app.models import (
+    AgentModel,
+    ArtifactModel,
+    ConnectedRepositoryModel,
+    ExecutionModel,
+    MeetingModel,
+    WorkforceModel,
+)
+
+RESOURCE_MODEL_MAP: dict[str, Type[Any]] = {
+    "artifact": ArtifactModel,
+    "workforce": WorkforceModel,
+    "execution": ExecutionModel,
+    "repository": ConnectedRepositoryModel,
+    "agent": AgentModel,
+    "meeting": MeetingModel,
+}
 
 # Workspace Role Permission Matrix (Part 4 Specification)
 WORKSPACE_ROLE_PERMISSIONS: dict[str, Set[str]] = {
@@ -73,10 +92,29 @@ class RBACGuard:
         resource_id: str,
     ) -> None:
         if resource is None:
-            raise HTTPException(status_code=404, detail=f"{resource_type} not found.")
+            model_cls = RESOURCE_MODEL_MAP.get(resource_type.lower())
+            if model_cls is not None:
+                async with privileged_rls_context(session):
+                    existing = (
+                        await session.execute(select(model_cls).where(model_cls.id == resource_id))
+                    ).scalar_one_or_none()
+                    if existing is not None:
+                        resource = existing
+            if resource is None:
+                raise HTTPException(status_code=404, detail=f"{resource_type} not found.")
 
         res_ws_id: Optional[str] = getattr(resource, "workspace_id", None)
         res_user_id: Optional[str] = getattr(resource, "user_id", None) or getattr(resource, "owner_user_id", None)
+        if not res_ws_id and hasattr(resource, "workforce_id") and getattr(resource, "workforce_id", None):
+            async with privileged_rls_context(session):
+                wf = (
+                    await session.execute(
+                        select(WorkforceModel).where(WorkforceModel.id == getattr(resource, "workforce_id"))
+                    )
+                ).scalar_one_or_none()
+                if wf is not None:
+                    res_ws_id = wf.workspace_id
+                    res_user_id = wf.user_id
 
         # Legacy default workforce before workspace backfill belongs to ws_forge_default / usr_director
         if res_ws_id is None and res_user_id in (None, "usr_director") and ctx.user_id == "usr_director":

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import WebSocket
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,29 +14,31 @@ logger = logging.getLogger("project_forge.events")
 
 
 class EventBus:
-    """Persistent event log and real-time WebSocket broadcaster with sequence tracking."""
+    """Tenant-isolated persistent event log and real-time WebSocket broadcaster with sequence tracking."""
 
     def __init__(self) -> None:
-        self._connections: Dict[str, Set[WebSocket]] = {}
+        # Maps workforce_id -> set of (websocket, workspace_id)
+        self._connections: Dict[str, Set[Tuple[WebSocket, str]]] = {}
         self._lock = asyncio.Lock()
 
-    async def connect(self, workforce_id: str, websocket: WebSocket) -> None:
+    async def connect(
+        self,
+        workforce_id: str,
+        websocket: WebSocket,
+        workspace_id: str,
+    ) -> None:
         await websocket.accept()
         async with self._lock:
             if workforce_id not in self._connections:
                 self._connections[workforce_id] = set()
-            self._connections[workforce_id].add(websocket)
-            # Also register under 'all' so listeners on active workforce receive everything
-            if "all" not in self._connections:
-                self._connections["all"] = set()
-            self._connections["all"].add(websocket)
+            self._connections[workforce_id].add((websocket, workspace_id))
 
     async def disconnect(self, workforce_id: str, websocket: WebSocket) -> None:
         async with self._lock:
             if workforce_id in self._connections:
-                self._connections[workforce_id].discard(websocket)
-            if "all" in self._connections:
-                self._connections["all"].discard(websocket)
+                self._connections[workforce_id] = {
+                    (ws, wid) for (ws, wid) in self._connections[workforce_id] if ws is not websocket
+                }
 
     async def emit(
         self,
@@ -45,6 +47,7 @@ class EventBus:
         event_type: EventTypeLiteral,
         entity_id: str,
         payload: Dict[str, Any],
+        workspace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         seq_res = await session.execute(
             select(func.max(AgentEventModel.sequence)).where(
@@ -79,16 +82,19 @@ class EventBus:
             "timestamp": now.isoformat(),
         }
 
-        await self.broadcast(workforce_id, event_dict)
+        await self.broadcast(workforce_id, event_dict, workspace_id=workspace_id)
         return event_dict
 
-    async def broadcast(self, workforce_id: str, message: Dict[str, Any]) -> None:
+    async def broadcast(
+        self,
+        workforce_id: str,
+        message: Dict[str, Any],
+        workspace_id: Optional[str] = None,
+    ) -> None:
         targets: List[WebSocket] = []
         async with self._lock:
-            for ws in self._connections.get(workforce_id, set()):
-                targets.append(ws)
-            for ws in self._connections.get("all", set()):
-                if ws not in targets:
+            for ws, bound_ws_id in self._connections.get(workforce_id, set()):
+                if workspace_id is None or bound_ws_id == workspace_id:
                     targets.append(ws)
 
         dead: List[WebSocket] = []
@@ -100,9 +106,10 @@ class EventBus:
 
         if dead:
             async with self._lock:
-                for ws in dead:
-                    for group in self._connections.values():
-                        group.discard(ws)
+                if workforce_id in self._connections:
+                    self._connections[workforce_id] = {
+                        (ws, wid) for (ws, wid) in self._connections[workforce_id] if ws not in dead
+                    }
 
 
 event_bus = EventBus()

@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Activity,
   Bell,
   Boxes,
   Building2,
+  CheckCircle2,
   Command,
   Cpu,
   Footprints,
@@ -12,10 +13,13 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  RefreshCw,
   Rocket,
   Search,
   Settings,
+  ShieldAlert,
   Sun,
+  Trash2,
   UserCheck,
   Users,
   Video,
@@ -71,27 +75,170 @@ export const TopBar: React.FC = () => {
 
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [modelInput, setModelInput] = useState(
-    tokenUsage?.active_model || 'gemini-3.1-flash-lite-preview'
+    tokenUsage?.active_model || 'gemini-3.1-flash-lite'
   );
   const [enableLiveToggle, setEnableLiveToggle] = useState(isLiveGeminiMode);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [testingSettings, setTestingSettings] = useState(false);
+  const [deletingSettings, setDeletingSettings] = useState(false);
+  const [credentialConfigured, setCredentialConfigured] = useState(false);
+  const [credentialStatusText, setCredentialStatusText] = useState('Not Configured');
+  const [credentialVersion, setCredentialVersion] = useState(0);
+  const [validationStatus, setValidationStatus] = useState('UNCONFIGURED');
+  const [lastValidatedAt, setLastValidatedAt] = useState<string | null>(null);
+  const [settingsFeedback, setSettingsFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
+  const loadWorkspaceLlmStatus = async () => {
+    try {
+      const token = useWorldStore.getState().authToken;
+      if (!token) return;
+      const res = await fetch(`${API_BASE_URL}/api/settings/llm`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setCredentialConfigured(Boolean(data.configured));
+      setCredentialStatusText(data.masked_status || data.credential_status || (data.configured ? 'Configured (Encrypted)' : 'Not Configured'));
+      setCredentialVersion(Number(data.credential_version || 0));
+      setValidationStatus(String(data.validation_status || 'UNCONFIGURED'));
+      setLastValidatedAt(data.last_validated_at || null);
+      if (data.selected_model) {
+        setModelInput(data.selected_model);
+      }
+      if (typeof data.enable_live_execution === 'boolean') {
+        setEnableLiveToggle(data.enable_live_execution);
+      }
+    } catch {
+      // Non-fatal status fetch failure
+    }
+  };
+
+  useEffect(() => {
+    if (settingsModalOpen) {
+      setSettingsFeedback(null);
+      setApiKeyInput('');
+      void loadWorkspaceLlmStatus();
+    }
+  }, [settingsModalOpen]);
+
+  const handleTestCredential = async () => {
+    setTestingSettings(true);
+    setSettingsFeedback(null);
+    try {
+      const token = useWorldStore.getState().authToken;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE_URL}/api/settings/llm/test`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          provider: 'gemini',
+          gemini_api_key: apiKeyInput.trim() ? apiKeyInput.trim() : undefined,
+          gemini_model: modelInput,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.valid === false) {
+        const msg = data.detail || data.message || `Credential test failed (${res.status})`;
+        setSettingsFeedback({ type: 'error', message: String(msg) });
+        return;
+      }
+      setValidationStatus(String(data.validation_status || 'VALID'));
+      setLastValidatedAt(data.last_validated_at || data.validated_at || new Date().toISOString());
+      setSettingsFeedback({
+        type: 'success',
+        message: `${data.detail || data.message || 'Workspace Gemini credential validated.'} (${data.latency_ms ?? 0} ms)`,
+      });
+    } catch (err) {
+      setSettingsFeedback({ type: 'error', message: `Connection test failed: ${String(err)}` });
+    } finally {
+      setTestingSettings(false);
+    }
+  };
+
+  const handleDeleteCredential = async () => {
+    setDeletingSettings(true);
+    setSettingsFeedback(null);
+    try {
+      const token = useWorldStore.getState().authToken;
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE_URL}/api/settings/llm`, {
+        method: 'DELETE',
+        headers,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSettingsFeedback({
+          type: 'error',
+          message: String(data.detail || `Failed to delete credential (${res.status})`),
+        });
+        return;
+      }
+      setCredentialConfigured(false);
+      setCredentialStatusText('Not Configured');
+      setCredentialVersion(0);
+      setValidationStatus('UNCONFIGURED');
+      setLastValidatedAt(null);
+      setEnableLiveToggle(false);
+      setApiKeyInput('');
+      setSettingsFeedback({
+        type: 'success',
+        message: 'Workspace Gemini API key deleted and provider cache invalidated.',
+      });
+      await fetchSnapshot();
+    } catch (err) {
+      setSettingsFeedback({ type: 'error', message: `Delete failed: ${String(err)}` });
+    } finally {
+      setDeletingSettings(false);
+    }
+  };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingSettings(true);
+    setSettingsFeedback(null);
     try {
-      await fetch(`${API_BASE_URL}/api/settings/llm`, {
+      const token = useWorldStore.getState().authToken;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const endpoint =
+        credentialConfigured && apiKeyInput.trim().length > 0
+          ? `${API_BASE_URL}/api/settings/llm/rotate`
+          : `${API_BASE_URL}/api/settings/llm`;
+      const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
+          provider: 'gemini',
           gemini_api_key: apiKeyInput.trim() ? apiKeyInput.trim() : undefined,
           gemini_model: modelInput,
           enable_live_execution: enableLiveToggle,
         }),
       });
-      await fetchSnapshot();
-      setSettingsModalOpen(false);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSettingsFeedback({
+          type: 'error',
+          message: String(data.detail || `Failed to save AI configuration (${res.status})`),
+        });
+        return;
+      }
       setApiKeyInput('');
+      await loadWorkspaceLlmStatus();
+      await fetchSnapshot();
+      setSettingsFeedback({
+        type: 'success',
+        message: 'Workspace AI configuration encrypted and saved.',
+      });
+    } catch (err) {
+      setSettingsFeedback({
+        type: 'error',
+        message: `Save failed: ${String(err)}`,
+      });
     } finally {
       setSavingSettings(false);
     }
@@ -359,10 +506,10 @@ export const TopBar: React.FC = () => {
             </div>
 
             <form onSubmit={handleSaveSettings} className="p-4 space-y-4 text-xs">
-              <div className="p-3 rounded-md bg-[#101216] border border-[#343A45] space-y-1.5">
+              <div className="p-3 rounded-md bg-[#101216] border border-[#343A45] space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-semibold uppercase text-[#A5ACB8]">
-                    Current AI Execution Status
+                    Workspace BYOK Status ({currentWorkspace?.name || 'Active Workspace'})
                   </span>
                   <span
                     className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
@@ -378,26 +525,98 @@ export const TopBar: React.FC = () => {
                   {tokenUsage?.provider_status ||
                     'DEMO MODE: No API key configured. Deterministic local simulation is active.'}
                 </div>
+                <div className="pt-1.5 border-t border-[#343A45]/60 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono">
+                  <span className="text-[#A5ACB8]">
+                    Credential:{' '}
+                    <strong className={credentialConfigured ? 'text-[#299B83]' : 'text-[#D29A43]'}>
+                      {credentialStatusText}
+                    </strong>
+                    {credentialVersion > 0 ? ` (v${credentialVersion})` : ''}
+                  </span>
+                  <span className="text-[#A5ACB8]">
+                    Validation:{' '}
+                    <strong
+                      className={
+                        validationStatus.startsWith('VALID')
+                          ? 'text-[#299B83]'
+                          : validationStatus === 'INVALID'
+                          ? 'text-[#E05252]'
+                          : 'text-[#D29A43]'
+                      }
+                    >
+                      {validationStatus}
+                    </strong>
+                    {lastValidatedAt ? ` • ${new Date(lastValidatedAt).toLocaleTimeString()}` : ''}
+                  </span>
+                </div>
               </div>
 
+              {settingsFeedback && (
+                <div
+                  className={`p-2.5 rounded-md border flex items-center gap-2 text-xs ${
+                    settingsFeedback.type === 'success'
+                      ? 'bg-[#299B83]/15 border-[#299B83]/50 text-[#299B83]'
+                      : 'bg-[#E05252]/15 border-[#E05252]/50 text-[#E05252]'
+                  }`}
+                >
+                  {settingsFeedback.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <ShieldAlert className="w-4 h-4 shrink-0" />
+                  )}
+                  <span>{settingsFeedback.message}</span>
+                </div>
+              )}
+
               <div>
-                <label className="block text-[11px] font-semibold text-[#A5ACB8] uppercase mb-1">
-                  Google Gemini API Key (Server-Side Only)
-                </label>
-                <input
-                  type="password"
-                  value={apiKeyInput}
-                  onChange={(e) => {
-                    setApiKeyInput(e.target.value);
-                    if (e.target.value.trim().length > 10) {
-                      setEnableLiveToggle(true);
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-[11px] font-semibold text-[#A5ACB8] uppercase">
+                    Google Gemini API Key (Fernet-Encrypted Workspace Vault)
+                  </label>
+                  <span className="text-[10px] font-mono text-[#4778D0]">Provider: gemini</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={apiKeyInput}
+                    onChange={(e) => {
+                      setApiKeyInput(e.target.value);
+                      if (e.target.value.trim().length > 10) {
+                        setEnableLiveToggle(true);
+                      }
+                    }}
+                    placeholder={
+                      credentialConfigured
+                        ? 'Enter new GEMINI_API_KEY to rotate existing workspace key...'
+                        : 'Enter GEMINI_API_KEY to enable Live Gemini Mode...'
                     }
-                  }}
-                  placeholder="Enter GEMINI_API_KEY to enable Live Gemini Mode..."
-                  className="w-full bg-[#101216] border border-[#343A45] rounded-md px-3 py-2 text-xs text-[#E8EBF0] focus:outline-none focus:border-[#4778D0]"
-                />
+                    className="flex-1 bg-[#101216] border border-[#343A45] rounded-md px-3 py-2 text-xs text-[#E8EBF0] focus:outline-none focus:border-[#4778D0]"
+                  />
+                  <button
+                    type="button"
+                    disabled={testingSettings || (!apiKeyInput.trim() && !credentialConfigured)}
+                    onClick={handleTestCredential}
+                    className="px-2.5 py-2 rounded-md bg-[#1B2028] hover:bg-[#252C37] disabled:opacity-40 border border-[#343A45] text-[#E8EBF0] font-semibold text-[11px] flex items-center gap-1.5 transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${testingSettings ? 'animate-spin' : ''}`} />
+                    <span>{testingSettings ? 'Testing...' : 'Test Key'}</span>
+                  </button>
+                  {credentialConfigured && (
+                    <button
+                      type="button"
+                      disabled={deletingSettings}
+                      onClick={handleDeleteCredential}
+                      title="Delete Workspace API Key"
+                      className="px-2.5 py-2 rounded-md bg-[#E05252]/15 hover:bg-[#E05252]/25 border border-[#E05252]/40 text-[#E05252] font-semibold text-[11px] flex items-center gap-1 transition"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{deletingSettings ? '...' : 'Delete'}</span>
+                    </button>
+                  )}
+                </div>
                 <p className="text-[10px] text-[#737D8C] mt-1">
-                  Leave blank to stay in deterministic Demo Mode with zero paid API requests.
+                  Encrypted at rest via Fernet and isolated strictly to this workspace. Never stored in browser storage or returned in API responses.
                 </p>
               </div>
 
@@ -420,15 +639,18 @@ export const TopBar: React.FC = () => {
 
               <div>
                 <label className="block text-[11px] font-semibold text-[#A5ACB8] uppercase mb-1">
-                  Primary Gemini Model ID (Tuned to Your Free Tier Quotas)
+                  Workspace Primary Gemini Model ID
                 </label>
                 <select
                   value={modelInput}
                   onChange={(e) => setModelInput(e.target.value)}
                   className="w-full bg-[#101216] border border-[#343A45] rounded-md px-3 py-2 text-xs text-[#E8EBF0] focus:outline-none focus:border-[#4778D0]"
                 >
+                  <option value="gemini-3.1-flash-lite">
+                    gemini-3.1-flash-lite — Recommended Default (15 RPM • 250K TPM • 500 RPD)
+                  </option>
                   <option value="gemini-3.1-flash-lite-preview">
-                    gemini-3.1-flash-lite-preview — Recommended (15 RPM • 250K TPM • 500 RPD)
+                    gemini-3.1-flash-lite-preview — Preview Lite (15 RPM • 250K TPM • 500 RPD)
                   </option>
                   <option value="gemini-3.5-flash-lite">
                     gemini-3.5-flash-lite — High Quota Lite (15 RPM • 250K TPM • 500 RPD)
@@ -437,14 +659,14 @@ export const TopBar: React.FC = () => {
                     gemini-2.5-flash-lite — Secondary Lite (10 RPM • 250K TPM • 20 RPD)
                   </option>
                   <option value="gemini-2.5-flash">
-                    gemini-2.5-flash — Low Daily Quota (5 RPM • 250K TPM • 20 RPD)
+                    gemini-2.5-flash — Standard Flash (5 RPM • 250K TPM • 20 RPD)
                   </option>
                   <option value="gemini-3-flash-preview">
-                    gemini-3-flash-preview — Low Daily Quota (5 RPM • 250K TPM • 20 RPD)
+                    gemini-3-flash-preview — Preview Flash (5 RPM • 250K TPM • 20 RPD)
                   </option>
                 </select>
                 <p className="text-[10px] text-[#299B83] mt-1">
-                  Strict sliding-window rate limiter active: paces requests automatically (4.2s spacing on 15 RPM tier) and disables 0-quota Pro/2.0 models.
+                  Per-workspace sliding-window rate limiter paces requests automatically and blocks 0-quota models.
                 </p>
               </div>
 
@@ -503,7 +725,11 @@ export const TopBar: React.FC = () => {
                   disabled={savingSettings}
                   className="px-4 py-1.5 rounded-md bg-[#4778D0] hover:bg-[#3b66b5] text-white font-semibold"
                 >
-                  {savingSettings ? 'Saving...' : 'Save Configuration'}
+                  {savingSettings
+                    ? 'Saving...'
+                    : credentialConfigured && apiKeyInput.trim().length > 0
+                    ? 'Rotate & Save Key'
+                    : 'Save Configuration'}
                 </button>
               </div>
             </form>

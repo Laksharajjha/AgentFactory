@@ -1,12 +1,19 @@
 import asyncio
 import io
+from pathlib import Path
+import sys
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 import httpx
 from sqlalchemy import select
 
-from app.database import AsyncSessionLocal, init_db
+from app.database import AsyncSessionLocal, init_db, privileged_rls_context
 from app.main import app
 from app.models import ExecutionLeaseModel, ExecutionModel
 from app.scheduler.execution_lease import ExecutionLeaseManager
@@ -244,18 +251,19 @@ async def run_all_acceptance_workflows() -> None:
 
         # Verify stale lease recovery
         async with AsyncSessionLocal() as session:
-            active_leases = list(
-                (
-                    await session.execute(
-                        select(ExecutionLeaseModel).where(ExecutionLeaseModel.status == "ACTIVE")
-                    )
-                ).scalars().all()
-            )
-            assert len(active_leases) >= 1
-            # Simulate a crashed worker by backdating expires_at
-            crashed_lease = active_leases[0]
-            crashed_lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=30)
-            await session.commit()
+            async with privileged_rls_context(session):
+                active_leases = list(
+                    (
+                        await session.execute(
+                            select(ExecutionLeaseModel).where(ExecutionLeaseModel.status == "ACTIVE")
+                        )
+                    ).scalars().all()
+                )
+                assert len(active_leases) >= 1
+                # Simulate a crashed worker by backdating expires_at
+                crashed_lease = active_leases[0]
+                crashed_lease.expires_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+                await session.commit()
 
             recovered = await ExecutionLeaseManager.recover_stale_leases(session)
             assert crashed_lease.execution_id in recovered

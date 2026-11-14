@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.agents.agent_memory import AgentMemoryManager
 from app.agents.state_manager import StateManager
 from app.agents.task_executor import TaskExecutor
-from app.database import AsyncSessionLocal
+from app.database import AsyncSessionLocal, apply_rls_context, privileged_rls_context
 from app.events.event_bus import event_bus
 from app.meetings.meeting_coordinator import MeetingCoordinator
 from app.models import (
@@ -121,16 +121,18 @@ class AgentRuntime:
 
         try:
             async with AsyncSessionLocal() as session:
-                wf_res = await session.execute(
-                    select(WorkforceModel).where(WorkforceModel.id == workforce_id)
-                )
-                workforce = wf_res.scalar_one_or_none()
+                async with privileged_rls_context(session):
+                    wf_res = await session.execute(
+                        select(WorkforceModel).where(WorkforceModel.id == workforce_id)
+                    )
+                    workforce = wf_res.scalar_one_or_none()
                 if not workforce:
                     return
 
                 tenant_id = workforce.tenant_id or f"ten_{workforce.user_id or 'usr_director'}"
                 workspace_id = workforce.workspace_id or "ws_forge_default"
                 user_id = workforce.user_id or "usr_director"
+                await apply_rls_context(session, user_id, workspace_id, "USER")
 
                 execution: Optional[ExecutionModel] = None
                 if resolved_exec_id:
@@ -550,15 +552,17 @@ class AgentRuntime:
                     final_status="COMPLETED",
                 )
                 if next_exec_id:
-                    next_ex = (
-                        await session.execute(select(ExecutionModel).where(ExecutionModel.id == next_exec_id))
-                    ).scalar_one_or_none()
+                    async with privileged_rls_context(session):
+                        next_ex = (
+                            await session.execute(select(ExecutionModel).where(ExecutionModel.id == next_exec_id))
+                        ).scalar_one_or_none()
                     if next_ex:
                         cls.launch_workforce_execution(next_ex.workforce_id, next_ex.id)
 
         except Exception as exc:
             logger.exception("Workforce pipeline failed for %s: %s", workforce_id, exc)
             async with AsyncSessionLocal() as session:
+                await apply_rls_context(session, user_id, workspace_id, "USER")
                 wf_res = await session.execute(
                     select(WorkforceModel).where(WorkforceModel.id == workforce_id)
                 )
@@ -575,9 +579,10 @@ class AgentRuntime:
                         error_message=str(exc),
                     )
                     if next_exec_id:
-                        next_ex = (
-                            await session.execute(select(ExecutionModel).where(ExecutionModel.id == next_exec_id))
-                        ).scalar_one_or_none()
+                        async with privileged_rls_context(session):
+                            next_ex = (
+                                await session.execute(select(ExecutionModel).where(ExecutionModel.id == next_exec_id))
+                            ).scalar_one_or_none()
                         if next_ex:
                             cls.launch_workforce_execution(next_ex.workforce_id, next_ex.id)
 
@@ -588,21 +593,43 @@ class AgentRuntime:
         instruction: str,
         assign_as_task: bool = True,
         priority: str = "HIGH",
+        workspace_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> None:
         async with AsyncSessionLocal() as session:
-            ag_res = await session.execute(
-                select(AgentModel).where(AgentModel.id == agent_id)
-            )
-            agent = ag_res.scalar_one_or_none()
-            if not agent:
+            async with privileged_rls_context(session):
+                ag_res = await session.execute(
+                    select(AgentModel).where(AgentModel.id == agent_id)
+                )
+                agent = ag_res.scalar_one_or_none()
+                if not agent:
+                    return
+
+                wf_res = await session.execute(
+                    select(WorkforceModel).where(WorkforceModel.id == agent.workforce_id)
+                )
+                workforce = wf_res.scalar_one_or_none()
+                if not workforce:
+                    return
+
+            if workspace_id and workforce.workspace_id != workspace_id:
+                logger.warning(
+                    "Blocked cross-workspace direct instruction for agent %s (expected=%s actual=%s)",
+                    agent_id,
+                    workspace_id,
+                    workforce.workspace_id,
+                )
                 return
 
-            wf_res = await session.execute(
-                select(WorkforceModel).where(WorkforceModel.id == agent.workforce_id)
+            resolved_user_id = user_id or workforce.user_id or "usr_director"
+            resolved_workspace_id = workspace_id or workforce.workspace_id or "ws_forge_default"
+
+            await apply_rls_context(
+                session,
+                resolved_user_id,
+                resolved_workspace_id,
+                "USER",
             )
-            workforce = wf_res.scalar_one_or_none()
-            if not workforce:
-                return
 
             await AgentMemoryManager.add_memory(
                 session=session,

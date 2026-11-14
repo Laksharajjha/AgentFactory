@@ -32,6 +32,7 @@ def upgrade() -> None:
 
     if bind.dialect.name == "postgresql":
         for table in RLS_TABLES:
+            col = "id" if table == "workspaces" else "workspace_id"
             op.execute(sa.text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;"))
             op.execute(
                 sa.text(
@@ -44,7 +45,7 @@ def upgrade() -> None:
                             CREATE POLICY {table}_tenant_isolation ON {table}
                             USING (
                                 current_setting('app.current_platform_role', true) = 'PLATFORM_ADMIN'
-                                OR workspace_id = current_setting('app.current_workspace_id', true)
+                                OR {col} = current_setting('app.current_workspace_id', true)
                             );
                         END IF;
                     END

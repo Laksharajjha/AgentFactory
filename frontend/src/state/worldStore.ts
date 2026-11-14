@@ -1273,21 +1273,10 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
     localStorage.removeItem('forge_auth_token');
     set({
       authToken: null,
-      currentUser: {
-        id: 'usr_director',
-        name: 'Executive Director',
-        email: 'director@projectforge.ai',
-        role: 'Founder & Principal Architect',
-        platform_role: 'PLATFORM_ADMIN',
-      },
-      activeWorkspace: {
-        id: 'ws_forge_default',
-        tenant_id: 'ten_usr_director',
-        name: "Executive Director's HQ Workspace",
-        slug: 'director-hq',
-      },
+      currentUser: null,
+      activeWorkspace: null,
+      authModalOpen: true,
     });
-    void get().fetchSnapshot('wf_forge_default');
   },
 
   createArtifact: async (artifactType, title, structuredContent = {}) => {
@@ -1383,12 +1372,18 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
 
   fetchSnapshot: async (workforceId) => {
     try {
+      const token = get().authToken;
+      if (!token) {
+        return;
+      }
       const target = workforceId || get().workforceId;
       const query = target && target !== 'wf_forge_default' ? `?workforce_id=${encodeURIComponent(target)}` : '';
-      const token = get().authToken;
-      const headers: Record<string, string> = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
+      const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
       const res = await fetch(`${API_BASE_URL}/api/world/snapshot${query}`, { headers });
+      if (res.status === 401) {
+        set({ authModalOpen: true });
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as WorldSnapshot;
       get().setSnapshot(data);
@@ -1435,8 +1430,12 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   triggerBoardroomMeeting: async () => {
     try {
       const wfId = get().workforceId;
+      const token = get().authToken;
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
       await fetch(`${API_BASE_URL}/api/meetings/trigger?workforce_id=${encodeURIComponent(wfId)}`, {
         method: 'POST',
+        headers,
       });
       useMeetingStore.getState().setSplitViewOpen(true);
       get().selectRoom('boardroom', true);
@@ -1447,9 +1446,12 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
 
   sendAgentInstruction: async (agentId, instruction, assignAsTask = true) => {
     try {
+      const token = get().authToken;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agentId)}/instructions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           instruction,
           assign_as_task: assignAsTask,
@@ -1469,8 +1471,12 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   toggleAgentPause: async (agent) => {
     try {
       const action = agent.state === 'PAUSED' ? 'resume' : 'pause';
+      const token = get().authToken;
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${API_BASE_URL}/api/agents/${encodeURIComponent(agent.id)}/${action}`, {
         method: 'POST',
+        headers,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const updated = (await res.json()) as AgentProfile;
@@ -1491,9 +1497,12 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
     });
     try {
       const wfId = get().workforceId;
+      const token = get().authToken;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       await fetch(`${API_BASE_URL}/api/simulation/control?workforce_id=${encodeURIComponent(wfId)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ speed, is_paused: isPaused }),
       });
     } catch {

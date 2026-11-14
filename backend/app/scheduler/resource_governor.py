@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import privileged_rls_context
 from app.models import ExecutionModel, ExecutionQueueModel, WorkforceModel
 from app.scheduler.admission_controller import AdmissionController
 from app.scheduler.capacity_monitor import CapacityMonitor
@@ -45,9 +46,10 @@ class ResourceGovernor:
         user_id: str,
         is_admin: bool = False,
     ) -> Dict[str, Any]:
-        ex = (
-            await session.execute(select(ExecutionModel).where(ExecutionModel.id == execution_id))
-        ).scalar_one_or_none()
+        async with privileged_rls_context(session):
+            ex = (
+                await session.execute(select(ExecutionModel).where(ExecutionModel.id == execution_id))
+            ).scalar_one_or_none()
         if not ex:
             raise HTTPException(status_code=404, detail="Execution not found.")
         if ex.user_id != user_id and not is_admin:

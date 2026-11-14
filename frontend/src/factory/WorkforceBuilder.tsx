@@ -62,8 +62,12 @@ export const WorkforceBuilder: React.FC = () => {
     try {
       const formData = new FormData();
       formData.append('file', file);
+      const token = useWorldStore.getState().authToken;
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${API_BASE_URL}/api/projects/analyze-zip`, {
         method: 'POST',
+        headers,
         body: formData,
       });
       if (!res.ok) {
@@ -83,9 +87,12 @@ export const WorkforceBuilder: React.FC = () => {
     if (!objective.trim()) return;
     setIsPreviewing(true);
     try {
+      const token = useWorldStore.getState().authToken;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${API_BASE_URL}/api/workforces/preview`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           name: projectName,
           objective,

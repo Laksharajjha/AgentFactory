@@ -160,6 +160,7 @@ class WorkforceFactory:
         agents: List[AgentModel],
     ) -> List[TaskModel]:
         agent_by_key = {a.agent_key: a for a in agents}
+        default_ws_id = next((a.workspace_id for a in agents if a.workspace_id), None)
         created_by_key: Dict[str, TaskModel] = {}
         ordered_tasks: List[TaskModel] = []
 
@@ -169,6 +170,7 @@ class WorkforceFactory:
             task = TaskModel(
                 id=task_id,
                 workforce_id=workforce_id,
+                workspace_id=(assigned_agent.workspace_id if assigned_agent and assigned_agent.workspace_id else default_ws_id),
                 title=bp.title,
                 description=bp.description,
                 assigned_agent_id=assigned_agent.id if assigned_agent else None,

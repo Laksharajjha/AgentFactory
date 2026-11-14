@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import privileged_rls_context
 from app.models import ExecutionLeaseModel, ExecutionQueueModel
 
 
@@ -18,43 +19,44 @@ class QuotaManager:
         if settings.ADMISSION_PAUSED:
             return ("QUEUE", "Administrator has paused new execution admission; request queued.")
 
-        global_active = (
-            await session.execute(
-                select(func.count())
-                .select_from(ExecutionLeaseModel)
-                .where(ExecutionLeaseModel.status == "ACTIVE")
-            )
-        ).scalar_one() or 0
-
-        user_active = (
-            await session.execute(
-                select(func.count())
-                .select_from(ExecutionLeaseModel)
-                .where(
-                    ExecutionLeaseModel.user_id == user_id,
-                    ExecutionLeaseModel.status == "ACTIVE",
+        async with privileged_rls_context(session):
+            global_active = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ExecutionLeaseModel)
+                    .where(ExecutionLeaseModel.status == "ACTIVE")
                 )
-            )
-        ).scalar_one() or 0
+            ).scalar_one() or 0
 
-        global_queued = (
-            await session.execute(
-                select(func.count())
-                .select_from(ExecutionQueueModel)
-                .where(ExecutionQueueModel.status == "QUEUED")
-            )
-        ).scalar_one() or 0
-
-        user_queued = (
-            await session.execute(
-                select(func.count())
-                .select_from(ExecutionQueueModel)
-                .where(
-                    ExecutionQueueModel.user_id == user_id,
-                    ExecutionQueueModel.status == "QUEUED",
+            user_active = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ExecutionLeaseModel)
+                    .where(
+                        ExecutionLeaseModel.user_id == user_id,
+                        ExecutionLeaseModel.status == "ACTIVE",
+                    )
                 )
-            )
-        ).scalar_one() or 0
+            ).scalar_one() or 0
+
+            global_queued = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ExecutionQueueModel)
+                    .where(ExecutionQueueModel.status == "QUEUED")
+                )
+            ).scalar_one() or 0
+
+            user_queued = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ExecutionQueueModel)
+                    .where(
+                        ExecutionQueueModel.user_id == user_id,
+                        ExecutionQueueModel.status == "QUEUED",
+                    )
+                )
+            ).scalar_one() or 0
 
         # Check if user or global queue is completely full
         if int(user_queued) >= settings.MAX_QUEUED_WORKFORCES_PER_USER:

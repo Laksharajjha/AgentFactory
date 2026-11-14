@@ -15,15 +15,30 @@ from app.agents.agent_runtime import AgentRuntime
 from app.agents.state_manager import StateManager
 from app.artifacts.artifact_manager import ArtifactManager
 from app.artifacts.artifact_storage import artifact_storage
-from app.auth.auth_service import AuthenticatedContext, AuthService, get_auth_context, require_authenticated_user
+from app.auth.auth_service import (
+    AuthenticatedContext,
+    AuthService,
+    authenticate_websocket,
+    get_auth_context,
+    get_optional_auth_context,
+    require_authenticated_user,
+)
 from app.auth.rbac import RBACGuard
 from app.config import settings
-from app.database import AsyncSessionLocal, get_db, init_db
+from app.database import (
+    AsyncSessionLocal,
+    apply_rls_context,
+    get_db,
+    init_db,
+    privileged_rls_context,
+)
 from app.events.event_bus import event_bus
 from app.factory.workforce_factory import WorkforceFactory
 from app.factory.zip_analyzer import ZipAnalyzer
 from app.integrations.github_service import GitHubService
 from app.llm.gemini_provider import gemini_provider
+from app.llm.model_catalog import ALLOWED_GEMINI_MODELS, DEFAULT_GEMINI_MODEL
+from app.llm.provider_resolver import WorkspaceProviderResolver
 from app.meetings.meeting_coordinator import MeetingCoordinator
 from app.models import (
     AgentEventModel,
@@ -56,6 +71,8 @@ from app.schemas import (
     GitHubBranchActionRequest,
     GitHubConnectRequest,
     LLMConfigUpdateRequest,
+    LLMModelSelectionRequest,
+    LLMTestCredentialRequest,
     MeetingSchema,
     OAuthLoginRequest,
     SimulationControlRequest,
@@ -79,7 +96,8 @@ logger = logging.getLogger("project_forge.api")
 async def lifespan(app: FastAPI):
     await init_db()
     async with AsyncSessionLocal() as session:
-        await SnapshotBuilder.ensure_default_workforce(session)
+        async with privileged_rls_context(session):
+            await SnapshotBuilder.ensure_default_workforce(session)
     yield
 
 
@@ -91,7 +109,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,7 +118,8 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health_check(session: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
-    cap = await CapacityMonitor.get_system_capacity(session)
+    async with privileged_rls_context(session):
+        cap = await CapacityMonitor.get_system_capacity(session)
     return {
         "status": "ok",
         "service": "PROJECT FORGE 3.0 Autonomous Work Platform",
@@ -132,6 +151,7 @@ async def register_user(
     # Provision initial personal 3D office workforce for the new user's workspace
     ws_id = result["workspace"]["id"]
     usr_id = result["user"]["id"]
+    await apply_rls_context(session, usr_id, ws_id, "USER")
     await SnapshotBuilder.ensure_default_workforce(session, user_id=usr_id, workspace_id=ws_id)
     return result
 
@@ -153,18 +173,12 @@ async def oauth_login(
     payload: OAuthLoginRequest,
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
-    res = await AuthService.oauth_login(
+    return await AuthService.oauth_login(
         session=session,
         provider=payload.provider,
         email=payload.email,
         name=payload.name,
     )
-    await SnapshotBuilder.ensure_default_workforce(
-        session,
-        user_id=res["user"]["id"],
-        workspace_id=res["workspace"]["id"],
-    )
-    return res
 
 
 @app.post("/api/auth/logout")
@@ -247,30 +261,132 @@ async def list_user_workspaces(
 
 
 # ============================================================================
-# SETTINGS & LLM GATEWAY
+# WORKSPACE-ISOLATED BYOK SETTINGS & LLM GATEWAY
 # ============================================================================
 
 
+@app.get("/api/settings/llm")
+async def get_llm_settings(
+    workspace_id: Optional[str] = Query(default=None),
+    provider: str = Query(default="gemini"),
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "office:read")
+    target_ws_id = (workspace_id or ctx.workspace_id).strip()
+    return await WorkspaceProviderResolver.get_credential_status(
+        session=session,
+        workspace_id=target_ws_id,
+        provider=provider,
+        ctx=ctx,
+    )
+
+
 @app.post("/api/settings/llm")
-async def update_llm_settings(payload: LLMConfigUpdateRequest) -> Dict[str, Any]:
-    if payload.gemini_api_key is not None:
-        gemini_provider.set_api_key(payload.gemini_api_key)
-    if payload.enable_live_execution is not None:
-        gemini_provider.set_live_execution(payload.enable_live_execution)
-    elif payload.gemini_api_key and len(payload.gemini_api_key.strip()) > 10:
-        gemini_provider.set_live_execution(True)
-    if payload.gemini_model:
-        settings.GEMINI_MODEL = payload.gemini_model
-    if payload.enable_complex_model is not None:
-        settings.ENABLE_COMPLEX_MODEL = payload.enable_complex_model
-    return {
-        "status": "updated",
-        "gemini_live_configured": gemini_provider.is_live_configured(),
-        "has_api_key": gemini_provider.has_api_key(),
-        "active_model": settings.GEMINI_MODEL,
-        "enable_complex_model": settings.ENABLE_COMPLEX_MODEL,
-        "rate_limits": gemini_provider.get_model_limits(settings.GEMINI_MODEL),
-    }
+async def update_llm_settings(
+    payload: LLMConfigUpdateRequest,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    target_ws_id = (payload.workspace_id or ctx.workspace_id).strip()
+    raw_key = payload.api_key if payload.api_key is not None else payload.gemini_api_key
+    raw_model = payload.selected_model if payload.selected_model is not None else payload.gemini_model
+    return await WorkspaceProviderResolver.configure_or_rotate_credential(
+        session=session,
+        ctx=ctx,
+        workspace_id=target_ws_id,
+        provider=payload.provider or "gemini",
+        api_key=raw_key,
+        selected_model=raw_model,
+        enable_live_execution=payload.enable_live_execution,
+        enable_complex_model=payload.enable_complex_model,
+        validate_before_save=payload.validate_before_save,
+        is_rotation=False,
+    )
+
+
+@app.post("/api/settings/llm/test")
+async def test_llm_credentials(
+    payload: LLMTestCredentialRequest,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    target_ws_id = (payload.workspace_id or ctx.workspace_id).strip()
+    raw_key = payload.api_key if payload.api_key is not None else payload.gemini_api_key
+    raw_model = payload.selected_model if payload.selected_model is not None else payload.gemini_model
+    return await WorkspaceProviderResolver.test_workspace_credential(
+        session=session,
+        ctx=ctx,
+        workspace_id=target_ws_id,
+        provider=payload.provider or "gemini",
+        candidate_api_key=raw_key,
+        candidate_model=raw_model,
+    )
+
+
+@app.put("/api/settings/llm/model")
+async def update_llm_selected_model(
+    payload: LLMModelSelectionRequest,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    target_ws_id = (payload.workspace_id or ctx.workspace_id).strip()
+    raw_model = payload.selected_model if payload.selected_model is not None else payload.gemini_model
+    if not raw_model:
+        raise HTTPException(status_code=422, detail="selected_model or gemini_model is required.")
+    return await WorkspaceProviderResolver.configure_or_rotate_credential(
+        session=session,
+        ctx=ctx,
+        workspace_id=target_ws_id,
+        provider=payload.provider or "gemini",
+        api_key=None,
+        selected_model=raw_model,
+        enable_live_execution=payload.enable_live_execution,
+        enable_complex_model=payload.enable_complex_model,
+        validate_before_save=False,
+        is_rotation=False,
+    )
+
+
+@app.post("/api/settings/llm/rotate")
+async def rotate_llm_credentials(
+    payload: LLMConfigUpdateRequest,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    target_ws_id = (payload.workspace_id or ctx.workspace_id).strip()
+    raw_key = payload.api_key if payload.api_key is not None else payload.gemini_api_key
+    if not raw_key or not raw_key.strip():
+        raise HTTPException(status_code=422, detail="A new API key is required to rotate credentials.")
+    raw_model = payload.selected_model if payload.selected_model is not None else payload.gemini_model
+    return await WorkspaceProviderResolver.configure_or_rotate_credential(
+        session=session,
+        ctx=ctx,
+        workspace_id=target_ws_id,
+        provider=payload.provider or "gemini",
+        api_key=raw_key,
+        selected_model=raw_model,
+        enable_live_execution=payload.enable_live_execution,
+        enable_complex_model=payload.enable_complex_model,
+        validate_before_save=payload.validate_before_save,
+        is_rotation=True,
+    )
+
+
+@app.delete("/api/settings/llm")
+async def delete_llm_credentials(
+    workspace_id: Optional[str] = Query(default=None),
+    provider: str = Query(default="gemini"),
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    target_ws_id = (workspace_id or ctx.workspace_id).strip()
+    return await WorkspaceProviderResolver.delete_credential(
+        session=session,
+        ctx=ctx,
+        workspace_id=target_ws_id,
+        provider=provider,
+    )
 
 
 # ============================================================================
@@ -354,16 +470,10 @@ async def download_artifact(
     version: int = Query(default=1),
     expires: Optional[int] = Query(default=None),
     signature: Optional[str] = Query(default=None),
-    ctx: AuthenticatedContext = Depends(get_auth_context),
+    ctx: Optional[AuthenticatedContext] = Depends(get_optional_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> Response:
-    art = (
-        await session.execute(select(ArtifactModel).where(ArtifactModel.id == artifact_id))
-    ).scalar_one_or_none()
-    if not art:
-        raise HTTPException(status_code=404, detail="Artifact not found.")
-
-    # Verify either short-lived signed URL OR authenticated workspace ownership
+    # Verify either short-lived HMAC-signed URL OR authenticated workspace ownership
     signed_ok = False
     if expires is not None and signature and workspace_id:
         signed_ok = artifact_storage.verify_signed_download(
@@ -373,11 +483,31 @@ async def download_artifact(
             expires=expires,
             signature=signature,
         )
-        if signed_ok and art.workspace_id != workspace_id:
-            signed_ok = False
 
-    if not signed_ok:
+    if signed_ok and workspace_id:
+        await apply_rls_context(session, "", workspace_id, "USER")
+        art = (
+            await session.execute(
+                select(ArtifactModel).where(
+                    ArtifactModel.id == artifact_id,
+                    ArtifactModel.workspace_id == workspace_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if not art:
+            raise HTTPException(status_code=404, detail="Artifact not found.")
+    else:
+        if ctx is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required or valid signed download URL must be provided.",
+            )
+        RBACGuard.require_permission(ctx, "artifact:read")
+        art = (
+            await session.execute(select(ArtifactModel).where(ArtifactModel.id == artifact_id))
+        ).scalar_one_or_none()
         await RBACGuard.verify_resource_ownership(session, ctx, art, "artifact", artifact_id)
+        assert art is not None
 
     try:
         raw_bytes = artifact_storage.get_bytes(art.storage_key)
@@ -638,7 +768,11 @@ async def decide_execution_approval(
 
 
 @app.post("/api/projects/analyze-zip")
-async def analyze_project_zip(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def analyze_project_zip(
+    file: UploadFile = File(...),
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "project:create")
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Only .zip project archives are supported.")
     raw_bytes = await file.read()
@@ -650,7 +784,11 @@ async def analyze_project_zip(file: UploadFile = File(...)) -> Dict[str, Any]:
 
 
 @app.post("/api/workforces/preview")
-async def preview_workforce_plan(payload: WorkforceCreateRequest) -> Dict[str, Any]:
+async def preview_workforce_plan(
+    payload: WorkforceCreateRequest,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "workforce:launch")
     plan = WorkforceFactory.build_workforce_plan(
         objective=payload.objective,
         project_summary=payload.project_context,
@@ -749,12 +887,12 @@ async def get_world_snapshot(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> WorldSnapshotSchema:
-    if workforce_id:
+    RBACGuard.require_permission(ctx, "office:read")
+    if workforce_id and workforce_id not in ("current", "default"):
         wf = (
             await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
         ).scalar_one_or_none()
-        if wf:
-            await RBACGuard.verify_resource_ownership(session, ctx, wf, "workforce", workforce_id)
+        await RBACGuard.verify_resource_ownership(session, ctx, wf, "workforce", workforce_id)
     return await SnapshotBuilder.build_world_snapshot(
         session,
         workforce_id,
@@ -769,7 +907,10 @@ async def get_world_snapshot(
 
 
 @app.get("/api/tools")
-async def list_registered_tools() -> List[Dict[str, Any]]:
+async def list_registered_tools(
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+) -> List[Dict[str, Any]]:
+    RBACGuard.require_permission(ctx, "office:read")
     return UniversalToolRegistry.list_tool_definitions()
 
 
@@ -888,9 +1029,10 @@ async def cancel_execution(
     )
     next_id = res.get("next_admitted_execution_id")
     if next_id:
-        next_ex = (
-            await session.execute(select(ExecutionModel).where(ExecutionModel.id == next_id))
-        ).scalar_one_or_none()
+        async with privileged_rls_context(session):
+            next_ex = (
+                await session.execute(select(ExecutionModel).where(ExecutionModel.id == next_id))
+            ).scalar_one_or_none()
         if next_ex:
             AgentRuntime.launch_workforce_execution(next_ex.workforce_id, next_ex.id)
     return res
@@ -901,8 +1043,10 @@ async def get_execution_queue(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "office:read")
     items = await QueueRepository.list_queue_snapshot(session, workspace_id=ctx.workspace_id)
-    cap = await CapacityMonitor.get_system_capacity(session)
+    async with privileged_rls_context(session):
+        cap = await CapacityMonitor.get_system_capacity(session)
     return {
         "queue_items": items,
         "capacity": cap,
@@ -915,8 +1059,9 @@ async def get_admin_capacity_dashboard(
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
     RBACGuard.require_platform_admin(ctx)
-    cap = await CapacityMonitor.get_system_capacity(session)
-    all_queue = await QueueRepository.list_queue_snapshot(session, workspace_id=None)
+    async with privileged_rls_context(session):
+        cap = await CapacityMonitor.get_system_capacity(session)
+        all_queue = await QueueRepository.list_queue_snapshot(session, workspace_id=None)
     return {
         "capacity": cap,
         "global_queue": all_queue,
@@ -952,6 +1097,7 @@ async def list_audit_logs(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> List[Dict[str, Any]]:
+    RBACGuard.require_permission(ctx, "office:read")
     res = await session.execute(
         select(AuditLogModel)
         .where(AuditLogModel.workspace_id == ctx.workspace_id)
@@ -986,13 +1132,14 @@ async def update_simulation_control(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "workforce:launch")
     wf = await SnapshotBuilder.ensure_default_workforce(session, ctx.user_id, ctx.workspace_id)
-    if workforce_id:
+    if workforce_id and workforce_id not in ("current", "default"):
         res = await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
         found = res.scalar_one_or_none()
-        if found:
-            await RBACGuard.verify_resource_ownership(session, ctx, found, "workforce", workforce_id)
-            wf = found
+        await RBACGuard.verify_resource_ownership(session, ctx, found, "workforce", workforce_id)
+        assert found is not None
+        wf = found
 
     if payload.speed is not None:
         wf.simulation_speed = max(0.5, min(5.0, payload.speed))
@@ -1013,6 +1160,12 @@ async def list_agents(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> List[AgentProfileSchema]:
+    RBACGuard.require_permission(ctx, "office:read")
+    if workforce_id and workforce_id not in ("current", "default"):
+        wf = (
+            await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
+        ).scalar_one_or_none()
+        await RBACGuard.verify_resource_ownership(session, ctx, wf, "workforce", workforce_id)
     snapshot = await SnapshotBuilder.build_world_snapshot(
         session,
         workforce_id,
@@ -1028,14 +1181,11 @@ async def get_agent(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> AgentProfileSchema:
+    RBACGuard.require_permission(ctx, "office:read")
     res = await session.execute(select(AgentModel).where(AgentModel.id == agent_id))
     agent = res.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    wf = (
-        await session.execute(select(WorkforceModel).where(WorkforceModel.id == agent.workforce_id))
-    ).scalar_one_or_none()
-    await RBACGuard.verify_resource_ownership(session, ctx, wf, "agent", agent_id)
+    await RBACGuard.verify_resource_ownership(session, ctx, agent, "agent", agent_id)
+    assert agent is not None
     return await SnapshotBuilder.serialize_agent(session, agent)
 
 
@@ -1046,14 +1196,11 @@ async def send_agent_instruction(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> AgentProfileSchema:
+    RBACGuard.require_permission(ctx, "workforce:launch")
     res = await session.execute(select(AgentModel).where(AgentModel.id == agent_id))
     agent = res.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    wf = (
-        await session.execute(select(WorkforceModel).where(WorkforceModel.id == agent.workforce_id))
-    ).scalar_one_or_none()
-    await RBACGuard.verify_resource_ownership(session, ctx, wf, "agent", agent_id)
+    await RBACGuard.verify_resource_ownership(session, ctx, agent, "agent", agent_id)
+    assert agent is not None
 
     asyncio.create_task(
         AgentRuntime.execute_direct_instruction(
@@ -1061,6 +1208,8 @@ async def send_agent_instruction(
             instruction=payload.instruction,
             assign_as_task=payload.assign_as_task,
             priority=payload.priority,
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
         )
     )
     return await SnapshotBuilder.serialize_agent(session, agent)
@@ -1072,14 +1221,11 @@ async def pause_agent(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> AgentProfileSchema:
+    RBACGuard.require_permission(ctx, "workforce:launch")
     res = await session.execute(select(AgentModel).where(AgentModel.id == agent_id))
     agent = res.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    wf = (
-        await session.execute(select(WorkforceModel).where(WorkforceModel.id == agent.workforce_id))
-    ).scalar_one_or_none()
-    await RBACGuard.verify_resource_ownership(session, ctx, wf, "agent", agent_id)
+    await RBACGuard.verify_resource_ownership(session, ctx, agent, "agent", agent_id)
+    assert agent is not None
     await StateManager.transition_state(session, agent, "PAUSED", activity="Paused by operator")
     return await SnapshotBuilder.serialize_agent(session, agent)
 
@@ -1090,14 +1236,11 @@ async def resume_agent(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> AgentProfileSchema:
+    RBACGuard.require_permission(ctx, "workforce:launch")
     res = await session.execute(select(AgentModel).where(AgentModel.id == agent_id))
     agent = res.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    wf = (
-        await session.execute(select(WorkforceModel).where(WorkforceModel.id == agent.workforce_id))
-    ).scalar_one_or_none()
-    await RBACGuard.verify_resource_ownership(session, ctx, wf, "agent", agent_id)
+    await RBACGuard.verify_resource_ownership(session, ctx, agent, "agent", agent_id)
+    assert agent is not None
     await StateManager.transition_state(session, agent, "IDLE", activity="Resumed and standing by")
     return await SnapshotBuilder.serialize_agent(session, agent)
 
@@ -1108,6 +1251,12 @@ async def list_tasks(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> List[TaskSchema]:
+    RBACGuard.require_permission(ctx, "office:read")
+    if workforce_id and workforce_id not in ("current", "default"):
+        wf = (
+            await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
+        ).scalar_one_or_none()
+        await RBACGuard.verify_resource_ownership(session, ctx, wf, "workforce", workforce_id)
     snapshot = await SnapshotBuilder.build_world_snapshot(
         session,
         workforce_id,
@@ -1123,6 +1272,12 @@ async def list_meetings(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> List[MeetingSchema]:
+    RBACGuard.require_permission(ctx, "office:read")
+    if workforce_id and workforce_id not in ("current", "default"):
+        wf = (
+            await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
+        ).scalar_one_or_none()
+        await RBACGuard.verify_resource_ownership(session, ctx, wf, "workforce", workforce_id)
     snapshot = await SnapshotBuilder.build_world_snapshot(
         session,
         workforce_id,
@@ -1138,14 +1293,11 @@ async def get_meeting(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> MeetingSchema:
+    RBACGuard.require_permission(ctx, "office:read")
     res = await session.execute(select(MeetingModel).where(MeetingModel.id == meeting_id))
     meeting = res.scalar_one_or_none()
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    wf = (
-        await session.execute(select(WorkforceModel).where(WorkforceModel.id == meeting.workforce_id))
-    ).scalar_one_or_none()
-    await RBACGuard.verify_resource_ownership(session, ctx, wf, "meeting", meeting_id)
+    await RBACGuard.verify_resource_ownership(session, ctx, meeting, "meeting", meeting_id)
+    assert meeting is not None
     agents = await AgentRegistry.get_workforce_agents(session, meeting.workforce_id)
     agents_by_id = {a.id: a for a in agents}
     return await SnapshotBuilder.serialize_meeting(session, meeting, agents_by_id)
@@ -1157,14 +1309,11 @@ async def observe_meeting(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> MeetingSchema:
+    RBACGuard.require_permission(ctx, "office:read")
     res = await session.execute(select(MeetingModel).where(MeetingModel.id == meeting_id))
     meeting = res.scalar_one_or_none()
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    wf = (
-        await session.execute(select(WorkforceModel).where(WorkforceModel.id == meeting.workforce_id))
-    ).scalar_one_or_none()
-    await RBACGuard.verify_resource_ownership(session, ctx, wf, "meeting", meeting_id)
+    await RBACGuard.verify_resource_ownership(session, ctx, meeting, "meeting", meeting_id)
+    assert meeting is not None
     meeting.is_observed = True
     await session.commit()
     agents = await AgentRegistry.get_workforce_agents(session, meeting.workforce_id)
@@ -1178,16 +1327,22 @@ async def trigger_boardroom_session(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "workforce:launch")
     wf = await SnapshotBuilder.ensure_default_workforce(session, ctx.user_id, ctx.workspace_id)
-    if workforce_id:
+    if workforce_id and workforce_id not in ("current", "default"):
         res = await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
         found = res.scalar_one_or_none()
-        if found:
-            await RBACGuard.verify_resource_ownership(session, ctx, found, "workforce", workforce_id)
-            wf = found
+        await RBACGuard.verify_resource_ownership(session, ctx, found, "workforce", workforce_id)
+        assert found is not None
+        wf = found
+
+    bg_user_id = ctx.user_id
+    bg_workspace_id = ctx.workspace_id
+    bg_role = ctx.platform_role
 
     async def _run_ad_hoc_meeting(target_wf_id: str, objective: str, summary: Any):
         async with AsyncSessionLocal() as bg_session:
+            await apply_rls_context(bg_session, bg_user_id, bg_workspace_id, bg_role)
             agents = await AgentRegistry.get_workforce_agents(bg_session, target_wf_id)
             if not agents:
                 return
@@ -1214,6 +1369,12 @@ async def get_usage(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> TokenUsageSummarySchema:
+    RBACGuard.require_permission(ctx, "office:read")
+    if workforce_id and workforce_id not in ("current", "default"):
+        wf = (
+            await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
+        ).scalar_one_or_none()
+        await RBACGuard.verify_resource_ownership(session, ctx, wf, "workforce", workforce_id)
     snapshot = await SnapshotBuilder.build_world_snapshot(
         session,
         workforce_id,
@@ -1231,8 +1392,18 @@ async def get_events(
     ctx: AuthenticatedContext = Depends(get_auth_context),
     session: AsyncSession = Depends(get_db),
 ) -> List[WorldEventSchema]:
-    wf = await SnapshotBuilder.ensure_default_workforce(session, ctx.user_id, ctx.workspace_id)
-    target_wf_id = workforce_id or wf.id
+    RBACGuard.require_permission(ctx, "office:read")
+    if workforce_id and workforce_id not in ("current", "default"):
+        wf_target = (
+            await session.execute(select(WorkforceModel).where(WorkforceModel.id == workforce_id))
+        ).scalar_one_or_none()
+        await RBACGuard.verify_resource_ownership(session, ctx, wf_target, "workforce", workforce_id)
+        assert wf_target is not None
+        target_wf_id = wf_target.id
+    else:
+        wf = await SnapshotBuilder.ensure_default_workforce(session, ctx.user_id, ctx.workspace_id)
+        target_wf_id = wf.id
+
     res = await session.execute(
         select(AgentEventModel)
         .where(
@@ -1259,11 +1430,43 @@ async def get_events(
 
 @app.websocket("/ws/world/{workforce_id}")
 async def websocket_world_endpoint(websocket: WebSocket, workforce_id: str):
-    await event_bus.connect(workforce_id, websocket)
+    if workforce_id == "all":
+        await websocket.close(code=1008, reason="Global wildcard subscription is forbidden.")
+        return
+
+    subscribed_wf_id: Optional[str] = None
     try:
         async with AsyncSessionLocal() as session:
-            target_id = None if workforce_id in ("current", "default", "all") else workforce_id
-            snapshot = await SnapshotBuilder.build_world_snapshot(session, target_id)
+            ctx = await authenticate_websocket(session, websocket)
+            RBACGuard.require_permission(ctx, "office:read")
+
+            if workforce_id in ("current", "default"):
+                wf = await SnapshotBuilder.ensure_default_workforce(
+                    session, user_id=ctx.user_id, workspace_id=ctx.workspace_id
+                )
+            else:
+                wf = (
+                    await session.execute(
+                        select(WorkforceModel).where(WorkforceModel.id == workforce_id)
+                    )
+                ).scalar_one_or_none()
+                await RBACGuard.verify_resource_ownership(
+                    session, ctx, wf, "workforce", workforce_id
+                )
+                assert wf is not None
+
+            subscribed_wf_id = wf.id
+            user_id = ctx.user_id
+            workspace_id = ctx.workspace_id
+            platform_role = ctx.platform_role
+
+            await event_bus.connect(subscribed_wf_id, websocket, workspace_id=workspace_id)
+            snapshot = await SnapshotBuilder.build_world_snapshot(
+                session,
+                subscribed_wf_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
             await websocket.send_json(
                 {
                     "type": "INITIAL_SNAPSHOT",
@@ -1278,11 +1481,30 @@ async def websocket_world_endpoint(websocket: WebSocket, workforce_id: str):
                 if msg_type == "PING":
                     await websocket.send_json({"type": "PONG"})
                 elif msg_type == "REQUEST_SNAPSHOT":
-                    req_wf_id = data.get("workforce_id") or (
-                        None if workforce_id in ("current", "default", "all") else workforce_id
-                    )
+                    req_wf_id = data.get("workforce_id") or subscribed_wf_id
+                    if req_wf_id in ("current", "default", "all"):
+                        req_wf_id = subscribed_wf_id
                     async with AsyncSessionLocal() as session:
-                        snap = await SnapshotBuilder.build_world_snapshot(session, req_wf_id)
+                        await apply_rls_context(session, user_id, workspace_id, platform_role)
+                        req_wf = (
+                            await session.execute(
+                                select(WorkforceModel).where(WorkforceModel.id == req_wf_id)
+                            )
+                        ).scalar_one_or_none()
+                        if not req_wf or req_wf.workspace_id != workspace_id:
+                            await websocket.send_json(
+                                {
+                                    "type": "ERROR",
+                                    "detail": "Forbidden: requested workforce belongs to another workspace.",
+                                }
+                            )
+                            continue
+                        snap = await SnapshotBuilder.build_world_snapshot(
+                            session,
+                            req_wf.id,
+                            user_id=user_id,
+                            workspace_id=workspace_id,
+                        )
                         await websocket.send_json(
                             {
                                 "type": "INITIAL_SNAPSHOT",
@@ -1291,9 +1513,15 @@ async def websocket_world_endpoint(websocket: WebSocket, workforce_id: str):
                         )
             except asyncio.TimeoutError:
                 await websocket.send_json({"type": "HEARTBEAT"})
+    except HTTPException as http_exc:
+        try:
+            await websocket.close(code=1008, reason=str(http_exc.detail)[:120])
+        except Exception:
+            pass
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         logger.debug("WebSocket closed: %s", exc)
     finally:
-        await event_bus.disconnect(workforce_id, websocket)
+        if subscribed_wf_id:
+            await event_bus.disconnect(subscribed_wf_id, websocket)

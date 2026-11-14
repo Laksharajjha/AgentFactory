@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.agent_memory import AgentMemoryManager
 from app.agents.tool_registry import ToolRegistry
 from app.events.event_bus import event_bus
-from app.llm.gemini_provider import gemini_provider
-from app.models import AgentModel, TaskModel
+from app.llm.provider_resolver import WorkspaceProviderResolver
+from app.models import AgentModel, TaskModel, WorkforceModel
 
 
 class AgentTaskAnalysisOutput(BaseModel):
@@ -54,7 +54,21 @@ class BaseAgent:
 
         fallback_data = self._build_contextual_fallback(task, objective, project_summary)
 
-        result, telemetry = await gemini_provider.generate_structured(
+        ws_id = self.model.workspace_id or task.workspace_id
+        if not ws_id:
+            from sqlalchemy import select
+            wf_row = (
+                await session.execute(select(WorkforceModel).where(WorkforceModel.id == self.model.workforce_id))
+            ).scalar_one_or_none()
+            ws_id = wf_row.workspace_id if wf_row else "ws_forge_default"
+
+        provider_instance = await WorkspaceProviderResolver.resolve_for_workspace(
+            session=session,
+            workspace_id=ws_id or "ws_forge_default",
+            provider="gemini",
+        )
+
+        result, telemetry = await provider_instance.generate_structured(
             session=session,
             workforce_id=self.model.workforce_id,
             agent_id=self.model.id,
