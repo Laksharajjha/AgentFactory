@@ -70,6 +70,7 @@ from app.schemas import (
     ExecutionApprovalDecisionRequest,
     GitHubBranchActionRequest,
     GitHubConnectRequest,
+    GitHubOAuthExchangeRequest,
     LLMConfigUpdateRequest,
     LLMModelSelectionRequest,
     LLMTestCredentialRequest,
@@ -86,6 +87,7 @@ from app.tools.tool_registry import UniversalToolRegistry
 from app.world.snapshot_builder import SnapshotBuilder
 from app.workspaces.diff_manager import DiffManager
 from app.workspaces.file_manager import FileManager
+from app.workspaces.git_manager import GitManager
 from app.workspaces.workspace_manager import workspace_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -95,9 +97,6 @@ logger = logging.getLogger("project_forge.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    async with AsyncSessionLocal() as session:
-        async with privileged_rls_context(session):
-            await SnapshotBuilder.ensure_default_workforce(session)
     yield
 
 
@@ -118,16 +117,19 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health_check(session: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
-    async with privileged_rls_context(session):
-        cap = await CapacityMonitor.get_system_capacity(session)
+    db_status = "ok"
+    try:
+        await session.execute(select(1))
+    except Exception:
+        db_status = "degraded"
     return {
-        "status": "ok",
+        "status": "ok" if db_status == "ok" else "degraded",
         "service": "PROJECT FORGE 3.0 Autonomous Work Platform",
         "version": settings.APP_VERSION,
         "database_engine": "postgresql" if settings.is_postgres else "sqlite-compatible",
+        "database_status": db_status,
         "gemini_live_configured": gemini_provider.is_live_configured(),
         "active_model": settings.GEMINI_MODEL,
-        "capacity": cap,
     }
 
 
@@ -548,6 +550,15 @@ async def delete_artifact(
 # ============================================================================
 
 
+@app.get("/api/github/status")
+async def get_github_status(
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "office:read")
+    return await GitHubService.get_connection_status(session=session, workspace_id=ctx.workspace_id)
+
+
 @app.post("/api/github/connect")
 async def connect_github_account(
     payload: GitHubConnectRequest,
@@ -561,8 +572,45 @@ async def connect_github_account(
         user_id=ctx.user_id,
         account_login=payload.account_login,
         installation_id=payload.installation_id,
-        access_token=payload.access_token,
-        repositories=payload.repositories,
+    )
+
+
+@app.delete("/api/github/disconnect")
+async def disconnect_github_account(
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "integrations:manage")
+    return await GitHubService.disconnect_github_app(session=session, workspace_id=ctx.workspace_id)
+
+
+@app.get("/api/github/oauth/start")
+async def start_github_oauth(
+    redirect_uri: str = Query(...),
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+) -> Dict[str, str]:
+    RBACGuard.require_permission(ctx, "integrations:manage")
+    return GitHubService.create_oauth_authorization_url(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        redirect_uri=redirect_uri,
+    )
+
+
+@app.post("/api/github/oauth/exchange")
+async def exchange_github_oauth(
+    payload: GitHubOAuthExchangeRequest,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "integrations:manage")
+    return await GitHubService.exchange_oauth_code(
+        session=session,
+        state=payload.state,
+        code=payload.code,
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        installation_id=payload.installation_id,
     )
 
 
@@ -577,6 +625,40 @@ async def list_connected_repositories(
         .order_by(desc(ConnectedRepositoryModel.created_at))
     )
     return [GitHubService.serialize_repo(r) for r in res.scalars().all()]
+
+
+@app.post("/api/github/repositories/sync")
+async def sync_connected_repositories(
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    RBACGuard.require_permission(ctx, "integrations:manage")
+    return await GitHubService.sync_workspace_repositories(
+        session=session,
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+    )
+
+
+@app.post("/api/github/repositories/{repo_id}/pulls/sync")
+async def sync_repository_pulls(
+    repo_id: str,
+    ctx: AuthenticatedContext = Depends(get_auth_context),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    RBACGuard.require_permission(ctx, "office:read")
+    repo = (
+        await session.execute(
+            select(ConnectedRepositoryModel).where(ConnectedRepositoryModel.id == repo_id)
+        )
+    ).scalar_one_or_none()
+    await RBACGuard.verify_resource_ownership(session, ctx, repo, "repository", repo_id)
+    assert repo is not None
+    return await GitHubService.sync_repository_pulls(
+        session=session,
+        workspace_id=ctx.workspace_id,
+        repo=repo,
+    )
 
 
 @app.post("/api/github/repositories/{repo_id}/execute-branch")
@@ -596,6 +678,11 @@ async def execute_repository_branch_workflow(
     assert repo is not None
 
     GitHubService.enforce_branch_safety(repo, payload.branch_name)
+    gh_token, _ = await GitHubService.get_installation_token(
+        session=session,
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+    )
 
     wf = await SnapshotBuilder.ensure_default_workforce(session, ctx.user_id, ctx.workspace_id)
     exec_id = payload.execution_id or f"exc_{uuid.uuid4().hex[:12]}"
@@ -620,26 +707,66 @@ async def execute_repository_branch_workflow(
         session.add(ex_row)
         await session.commit()
 
-    sandbox_info = workspace_manager.allocate_sandbox(
-        tenant_id=ctx.tenant_id,
-        execution_id=exec_id,
-        repo_full_name=repo.full_name,
-        default_branch=repo.default_branch,
-        working_branch=payload.branch_name,
-    )
-    sandbox_dir = workspace_manager.get_sandbox_dir(ctx.tenant_id, exec_id)
+    try:
+        sandbox_info = workspace_manager.allocate_sandbox(
+            tenant_id=ctx.tenant_id,
+            execution_id=exec_id,
+            repo_full_name=repo.full_name,
+            default_branch=repo.default_branch,
+            working_branch=payload.branch_name,
+            clone_url=repo.clone_url,
+            auth_token=gh_token,
+        )
+        sandbox_dir = workspace_manager.get_sandbox_dir(ctx.tenant_id, exec_id)
 
-    new_content = payload.file_content or (
-        "def verify_token(token: str, required_aud: str = 'forge-api') -> bool:\n"
-        "    \"\"\"Zero-trust token validation with audience & length enforcement.\"\"\"\n"
-        "    if not token or len(token.strip()) < 10:\n"
-        "        return False\n"
-        "    return bool(required_aud)\n"
-    )
-    FileManager.write_file(sandbox_dir, payload.file_path, new_content)
-    test_result = workspace_manager.run_sandboxed_tests(ctx.tenant_id, exec_id)
-    diff_result = DiffManager.generate_diff(sandbox_dir)
-    commit_result = DiffManager.commit_changes(sandbox_dir, payload.commit_message)
+        if payload.file_content is not None:
+            new_content = payload.file_content
+        else:
+            existing_target = (sandbox_dir / payload.file_path).resolve()
+            if existing_target.exists() and str(existing_target).startswith(str(sandbox_dir.resolve())):
+                existing_text = existing_target.read_text(encoding="utf-8")
+                new_content = (
+                    existing_text.rstrip()
+                    + "\n\n## PROJECT FORGE Autonomous Verification\n\n"
+                    + f"- Verified on isolated branch `{payload.branch_name}`.\n"
+                )
+            else:
+                new_content = (
+                    f"# {repo.full_name}\n\n"
+                    f"## PROJECT FORGE Autonomous Verification\n\n"
+                    f"- Verified on isolated branch `{payload.branch_name}`.\n"
+                )
+
+        FileManager.write_file(sandbox_dir, payload.file_path, new_content)
+        test_result = workspace_manager.run_sandboxed_tests(ctx.tenant_id, exec_id)
+        diff_result = DiffManager.generate_diff(sandbox_dir)
+        if not diff_result["has_changes"]:
+            raise HTTPException(status_code=400, detail="No file changes detected to commit or push.")
+        commit_result = DiffManager.commit_changes(sandbox_dir, payload.commit_message)
+        if not commit_result.get("committed"):
+            raise HTTPException(status_code=500, detail="Local git commit failed on working branch.")
+
+        push_result = GitManager.push_branch(
+            sandbox_dir=sandbox_dir,
+            branch_name=payload.branch_name,
+            auth_token=gh_token,
+            protected_branches=[repo.default_branch],
+        )
+        if not push_result.get("pushed"):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Git push failed for branch '{payload.branch_name}': {push_result.get('stderr') or 'unknown git error'}",
+            )
+    except HTTPException:
+        ex_row.status = "FAILED"
+        await session.commit()
+        workspace_manager.release_and_cleanup_sandbox(ctx.tenant_id, exec_id)
+        raise
+    except Exception as exc:
+        ex_row.status = "FAILED"
+        await session.commit()
+        workspace_manager.release_and_cleanup_sandbox(ctx.tenant_id, exec_id)
+        raise HTTPException(status_code=502, detail=f"Repository branch workflow failed: {exc}")
 
     approval = ExecutionApprovalModel(
         id=f"apr_{uuid.uuid4().hex[:12]}",
@@ -647,23 +774,27 @@ async def execute_repository_branch_workflow(
         workspace_id=ctx.workspace_id,
         action_type="CREATE_PULL_REQUEST",
         title=f"Approve Pull Request on {repo.full_name} ({payload.branch_name} -> {repo.default_branch})",
-        description=f"Tests executed with exit_code={test_result['exit_code']}. Review diff and approve to open PR.",
+        description=f"Tests executed with exit_code={test_result['exit_code']}. Branch '{payload.branch_name}' pushed to GitHub. Review diff and approve to open PR.",
         diff_preview=diff_result["diff"],
         payload={
             "repository_id": repo.id,
             "working_branch": payload.branch_name,
             "base_branch": repo.default_branch,
             "commit_sha": commit_result["commit_sha"],
+            "remote_pushed": True,
         },
         status="PENDING",
     )
     session.add(approval)
     ex_row.status = "WAITING_FOR_APPROVAL"
     ex_row.verification_json = {
+        "cloned_from_github": sandbox_info.get("cloned", True),
         "tests_executed": True,
         "test_exit_code": test_result["exit_code"],
         "diff_generated": diff_result["has_changes"],
         "commit_sha": commit_result["commit_sha"],
+        "remote_pushed": True,
+        "remote_branch_url": f"{repo.html_url}/tree/{payload.branch_name}",
     }
     await session.commit()
 
@@ -674,7 +805,9 @@ async def execute_repository_branch_workflow(
         "repository": GitHubService.serialize_repo(repo),
         "working_branch": payload.branch_name,
         "base_commit": sandbox_info["base_commit"],
+        "cloned": sandbox_info.get("cloned", True),
         "commit": commit_result,
+        "push": push_result,
         "tests": test_result,
         "diff": diff_result,
         "approval_gate": {
@@ -860,6 +993,7 @@ async def create_workforce(
         workforce.id,
         user_id=ctx.user_id,
         workspace_id=ctx.workspace_id,
+        include_global_capacity=ctx.platform_role in ("PLATFORM_ADMIN", "PLATFORM_OPERATOR"),
     )
 
 
@@ -878,6 +1012,7 @@ async def get_workforce(
         workforce_id,
         user_id=ctx.user_id,
         workspace_id=ctx.workspace_id,
+        include_global_capacity=ctx.platform_role in ("PLATFORM_ADMIN", "PLATFORM_OPERATOR"),
     )
 
 
@@ -898,6 +1033,7 @@ async def get_world_snapshot(
         workforce_id,
         user_id=ctx.user_id,
         workspace_id=ctx.workspace_id,
+        include_global_capacity=ctx.platform_role in ("PLATFORM_ADMIN", "PLATFORM_OPERATOR"),
     )
 
 
@@ -1045,11 +1181,20 @@ async def get_execution_queue(
 ) -> Dict[str, Any]:
     RBACGuard.require_permission(ctx, "office:read")
     items = await QueueRepository.list_queue_snapshot(session, workspace_id=ctx.workspace_id)
-    async with privileged_rls_context(session):
-        cap = await CapacityMonitor.get_system_capacity(session)
+    is_platform_admin = ctx.platform_role in ("PLATFORM_ADMIN", "PLATFORM_OPERATOR")
+    cap = None
+    if is_platform_admin:
+        async with privileged_rls_context(session):
+            cap = await CapacityMonitor.get_system_capacity(session)
     return {
         "queue_items": items,
         "capacity": cap,
+        "workspace_queue_summary": {
+            "workspace_id": ctx.workspace_id,
+            "queued_in_workspace": sum(1 for item in items if item.get("status") == "QUEUED"),
+            "active_in_workspace": sum(1 for item in items if item.get("status") == "ACTIVE"),
+            "total_in_workspace": len(items),
+        },
     }
 
 
@@ -1466,6 +1611,7 @@ async def websocket_world_endpoint(websocket: WebSocket, workforce_id: str):
                 subscribed_wf_id,
                 user_id=user_id,
                 workspace_id=workspace_id,
+                include_global_capacity=platform_role in ("PLATFORM_ADMIN", "PLATFORM_OPERATOR"),
             )
             await websocket.send_json(
                 {
@@ -1504,6 +1650,7 @@ async def websocket_world_endpoint(websocket: WebSocket, workforce_id: str):
                             req_wf.id,
                             user_id=user_id,
                             workspace_id=workspace_id,
+                            include_global_capacity=platform_role in ("PLATFORM_ADMIN", "PLATFORM_OPERATOR"),
                         )
                         await websocket.send_json(
                             {

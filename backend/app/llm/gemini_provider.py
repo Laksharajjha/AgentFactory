@@ -124,7 +124,7 @@ class GeminiProvider(BaseLLMProvider):
 
     def __init__(
         self,
-        workspace_id: str = "ws_forge_default",
+        workspace_id: str,
         api_key: str = "",
         model_id: str = DEFAULT_GEMINI_MODEL,
         complex_model_id: Optional[str] = None,
@@ -133,7 +133,10 @@ class GeminiProvider(BaseLLMProvider):
         credential_version: int = 0,
         credential_source: str = "none",
     ) -> None:
-        self.workspace_id = (workspace_id or "ws_forge_default").strip()
+        clean_ws_id = (workspace_id or "").strip()
+        if not clean_ws_id:
+            raise ValueError("Explicit workspace_id is required for GeminiProvider.")
+        self.workspace_id = clean_ws_id
         self._api_key = (api_key or "").strip()
         self.model_id = (model_id or DEFAULT_GEMINI_MODEL).strip()
         if self.model_id in ZERO_QUOTA_FREE_TIER_MODELS or self.model_id not in ALLOWED_GEMINI_MODELS:

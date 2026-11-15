@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { KeyRound, LogIn, ShieldCheck, UserPlus, X } from 'lucide-react';
+import { LogIn, ShieldCheck, UserPlus, X } from 'lucide-react';
 import { API_BASE_URL } from '../../config';
 import { useWorldStore } from '../../state/worldStore';
 
@@ -43,29 +43,6 @@ export const AuthModal: React.FC = () => {
       setAuthSession(data.access_token, data.user, data.workspace);
     } catch (err) {
       setError(String(err instanceof Error ? err.message : err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleQuickOAuth = async (provider: 'google' | 'github') => {
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/auth/oauth`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider,
-          email: `${provider}.engineer@projectforge.ai`,
-          name: `${provider === 'github' ? 'GitHub' : 'Google'} Verified Engineer`,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'OAuth failed');
-      setAuthSession(data.access_token, data.user, data.workspace);
-    } catch (err) {
-      setError(String(err));
     } finally {
       setLoading(false);
     }
@@ -210,23 +187,6 @@ export const AuthModal: React.FC = () => {
                 : 'Sign In to Workspace'}
             </button>
           </form>
-
-          <div className="pt-2 border-t border-[#343A45] grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => void handleQuickOAuth('github')}
-              className="py-1.5 px-3 rounded-md bg-[#1B2028] hover:bg-[#22262E] border border-[#343A45] text-[#E8EBF0] text-[11px] font-medium flex items-center justify-center gap-1.5"
-            >
-              <KeyRound className="w-3 h-3 text-[#299B83]" /> GitHub SSO
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleQuickOAuth('google')}
-              className="py-1.5 px-3 rounded-md bg-[#1B2028] hover:bg-[#22262E] border border-[#343A45] text-[#E8EBF0] text-[11px] font-medium flex items-center justify-center gap-1.5"
-            >
-              <KeyRound className="w-3 h-3 text-[#4778D0]" /> Google SSO
-            </button>
-          </div>
         </div>
       </div>
     </div>

@@ -37,6 +37,10 @@ export const CommandPalette: React.FC = () => {
   const selectAgent = useWorldStore((s) => s.selectAgent);
   const createArtifact = useWorldStore((s) => s.createArtifact);
   const connectGitHub = useWorldStore((s) => s.connectGitHub);
+  const currentUser = useWorldStore((s) => s.currentUser);
+  const isPlatformAdmin =
+    currentUser?.platform_role === 'PLATFORM_ADMIN' ||
+    currentUser?.platform_role === 'PLATFORM_OPERATOR';
 
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -94,13 +98,13 @@ export const CommandPalette: React.FC = () => {
       },
       {
         id: 'connect-github',
-        title: 'Connect GitHub App & Authorize Repositories',
-        subtitle: 'Link Laksharajjha/AgentFactory for isolated branch execution',
+        title: 'Connect GitHub App & Discover Repositories',
+        subtitle: 'Authenticate GitHub App installation for real clone, push & PR workflows',
         category: 'GitHub',
         shortcut: 'G H',
         icon: <FolderGit2 className="w-4 h-4 text-[#299B83]" />,
         onSelect: () => {
-          void connectGitHub('Laksharajjha');
+          void connectGitHub();
           setActiveAppSection('github');
           setOpen(false);
         },
@@ -152,18 +156,22 @@ export const CommandPalette: React.FC = () => {
           setOpen(false);
         },
       },
-      {
-        id: 'inspect-status',
-        title: 'Inspect Administrator Capacity & Resource Governor',
-        subtitle: 'Configure concurrency limits, queue quotas, memory/CPU & Gemini RPM',
-        category: 'Administration',
-        shortcut: 'G C',
-        icon: <Cpu className="w-4 h-4 text-[#C45D62]" />,
-        onSelect: () => {
-          setActiveAppSection('admin');
-          setOpen(false);
-        },
-      },
+      ...(isPlatformAdmin
+        ? [
+            {
+              id: 'inspect-status',
+              title: 'Inspect Administrator Capacity & Resource Governor',
+              subtitle: 'Configure concurrency limits, queue quotas, memory/CPU & Gemini RPM',
+              category: 'Administration',
+              shortcut: 'G C',
+              icon: <Cpu className="w-4 h-4 text-[#C45D62]" />,
+              onSelect: () => {
+                setActiveAppSection('admin');
+                setOpen(false);
+              },
+            },
+          ]
+        : []),
       {
         id: 'open-auth',
         title: 'Switch User Account / Multi-Tenant Workspace',
@@ -212,6 +220,7 @@ export const CommandPalette: React.FC = () => {
     setAuthModalOpen,
     setFactoryModalOpen,
     setOpen,
+    isPlatformAdmin,
     setSettingsModalOpen,
   ]);
 

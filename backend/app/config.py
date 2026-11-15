@@ -52,12 +52,14 @@ class Settings(BaseSettings):
 
     # GitHub App Integration
     GITHUB_APP_ID: str = ""
-    GITHUB_APP_SLUG: str = "project-forge-autonomous"
+    GITHUB_APP_SLUG: str = "projectforge-platform"
+    GITHUB_APP_INSTALLATION_ID: str = ""
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
     GITHUB_PRIVATE_KEY_PEM: str = ""
     GITHUB_PRIVATE_KEY_PATH: str = ""
     GITHUB_WEBHOOK_SECRET: str = ""
+    GITHUB_OAUTH_REDIRECT_URI: str = ""
 
     # Upstash Redis Coordination & Distributed Locks
     UPSTASH_REDIS_REST_URL: str = ""
@@ -65,6 +67,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
 
     # S3-Compatible Object Storage & Signed URLs (supports both OBJECT_STORAGE_* and AWS_* aliases)
+    ARTIFACT_STORAGE_BACKEND: str = "auto"  # "auto" | "s3" | "local"
     OBJECT_STORAGE_BUCKET: str = "project-forge-artifacts"
     OBJECT_STORAGE_ENDPOINT: str = ""
     OBJECT_STORAGE_REGION: str = "auto"

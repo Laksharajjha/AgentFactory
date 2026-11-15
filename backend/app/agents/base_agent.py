@@ -60,11 +60,15 @@ class BaseAgent:
             wf_row = (
                 await session.execute(select(WorkforceModel).where(WorkforceModel.id == self.model.workforce_id))
             ).scalar_one_or_none()
-            ws_id = wf_row.workspace_id if wf_row else "ws_forge_default"
+            ws_id = wf_row.workspace_id if wf_row else None
+        if not ws_id:
+            raise RuntimeError(
+                f"Agent {self.model.id} (workforce={self.model.workforce_id}) is missing explicit workspace ownership."
+            )
 
         provider_instance = await WorkspaceProviderResolver.resolve_for_workspace(
             session=session,
-            workspace_id=ws_id or "ws_forge_default",
+            workspace_id=ws_id,
             provider="gemini",
         )
 

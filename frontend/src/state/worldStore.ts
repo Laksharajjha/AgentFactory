@@ -242,7 +242,7 @@ export interface AmbientOverride {
 export const INITIAL_FALLBACK_AGENTS: AgentProfile[] = [
   {
     id: 'agt_default_alex',
-    workforce_id: 'wf_forge_default',
+    workforce_id: '',
     agent_key: 'alex',
     name: 'Alex',
     role: 'Chief Executive / Orchestrator',
@@ -278,7 +278,7 @@ export const INITIAL_FALLBACK_AGENTS: AgentProfile[] = [
   },
   {
     id: 'agt_default_marcus',
-    workforce_id: 'wf_forge_default',
+    workforce_id: '',
     agent_key: 'marcus',
     name: 'Marcus',
     role: 'System Architect',
@@ -314,7 +314,7 @@ export const INITIAL_FALLBACK_AGENTS: AgentProfile[] = [
   },
   {
     id: 'agt_default_olivia',
-    workforce_id: 'wf_forge_default',
+    workforce_id: '',
     agent_key: 'olivia',
     name: 'Olivia',
     role: 'Product Manager',
@@ -350,7 +350,7 @@ export const INITIAL_FALLBACK_AGENTS: AgentProfile[] = [
   },
   {
     id: 'agt_default_sarah',
-    workforce_id: 'wf_forge_default',
+    workforce_id: '',
     agent_key: 'sarah',
     name: 'Sarah',
     role: 'Backend Engineer',
@@ -386,7 +386,7 @@ export const INITIAL_FALLBACK_AGENTS: AgentProfile[] = [
   },
   {
     id: 'agt_default_daniel',
-    workforce_id: 'wf_forge_default',
+    workforce_id: '',
     agent_key: 'daniel',
     name: 'Daniel',
     role: 'Frontend Engineer',
@@ -422,7 +422,7 @@ export const INITIAL_FALLBACK_AGENTS: AgentProfile[] = [
   },
   {
     id: 'agt_default_nina',
-    workforce_id: 'wf_forge_default',
+    workforce_id: '',
     agent_key: 'nina',
     name: 'Nina',
     role: 'QA Engineer',
@@ -500,7 +500,22 @@ interface WorldStoreState {
     tenant_id: string;
     name: string;
     slug: string;
+    role?: string;
   } | null;
+
+  githubStatus: 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';
+  githubInstallation: {
+    id: string;
+    installation_id: string;
+    account_login: string;
+    account_type: string;
+    permissions: Record<string, string>;
+    status: string;
+    token_expires_at?: string | null;
+  } | null;
+  githubError: string | null;
+  githubInstallUrl: string | null;
+  githubOAuthConfigured: boolean;
 
   viewMode: ViewMode;
   daylightPreset: DaylightPreset;
@@ -574,13 +589,31 @@ interface WorldStoreState {
     user: { id: string; name: string; email: string; role: string; platform_role: string },
     workspace: { id: string; tenant_id: string; name: string; slug: string }
   ) => void;
+  clearAuthSession: (openModal?: boolean) => void;
+  hydrateAuthSession: () => Promise<boolean>;
+  switchWorkspace: (workspace: { id: string; tenant_id: string; name: string; slug: string; role?: string }) => Promise<void>;
   logoutSession: () => Promise<void>;
   createArtifact: (artifactType: string, title: string, structuredContent?: Record<string, unknown>) => Promise<ArtifactItem | null>;
-  connectGitHub: (accountLogin: string) => Promise<void>;
-  executeRepoBranch: (repoId: string, branchName: string, filePath?: string) => Promise<void>;
-  decideApproval: (executionId: string, approvalId: string, decision: 'APPROVED' | 'REJECTED') => Promise<void>;
+  fetchGitHubStatus: () => Promise<void>;
+  connectGitHub: (accountLogin?: string) => Promise<{ ok: boolean; error?: string }>;
+  startGitHubOAuth: (mode?: 'install' | 'oauth') => Promise<void>;
+  completeGitHubOAuth: (
+    code: string,
+    state: string,
+    installationId?: string | null
+  ) => Promise<{ ok: boolean; error?: string }>;
+  setGitHubError: (error: string | null) => void;
+  syncGitHubRepos: () => Promise<void>;
+  syncRepoPulls: (repoId: string) => Promise<void>;
+  disconnectGitHub: () => Promise<void>;
+  executeRepoBranch: (repoId: string, branchName: string, filePath?: string) => Promise<{ ok: boolean; error?: string }>;
+  decideApproval: (
+    executionId: string,
+    approvalId: string,
+    decision: 'APPROVED' | 'REJECTED'
+  ) => Promise<{ ok: boolean; error?: string; pullRequest?: Record<string, unknown> | null }>;
   cancelExecution: (executionId: string) => Promise<void>;
-  updateAdminGovernor: (config: Record<string, unknown>) => Promise<void>;
+  updateAdminGovernor: (config: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
 
   fetchSnapshot: (workforceId?: string) => Promise<void>;
   deployWorkforce: (name: string, objective: string, projectContext?: ProjectSummary | null) => Promise<void>;
@@ -590,8 +623,16 @@ interface WorldStoreState {
   setSimulationControl: (speed?: number, isPaused?: boolean) => Promise<void>;
 }
 
+const getStoredAuthToken = (): string | null => {
+  if (typeof localStorage === 'undefined') return null;
+  const token = localStorage.getItem('forge_auth_token');
+  return token && token.trim() ? token : null;
+};
+
+const initialAuthToken = getStoredAuthToken();
+
 export const useWorldStore = create<WorldStoreState>((set, get) => ({
-  workforceId: 'wf_forge_default',
+  workforceId: '',
   workforceName: 'Project Forge Core Engineering',
   objective: 'Standby in virtual headquarters. Submit a software project objective or ZIP archive to dispatch the autonomous workforce.',
   workforceStatus: 'READY',
@@ -617,21 +658,10 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   leftNavCollapsed: false,
   rightInspectorCollapsed: false,
   commandPaletteOpen: false,
-  authModalOpen: false,
-  authToken: localStorage.getItem('forge_auth_token'),
-  currentUser: {
-    id: 'usr_director',
-    name: 'Executive Director',
-    email: 'director@projectforge.ai',
-    role: 'Founder & Principal Architect',
-    platform_role: 'PLATFORM_ADMIN',
-  },
-  activeWorkspace: {
-    id: 'ws_forge_default',
-    tenant_id: 'ten_usr_director',
-    name: "Executive Director's HQ Workspace",
-    slug: 'director-hq',
-  },
+  authModalOpen: !initialAuthToken,
+  authToken: initialAuthToken,
+  currentUser: null,
+  activeWorkspace: null,
 
   viewMode: 'DOLLHOUSE',
   daylightPreset: 'DAYTIME',
@@ -657,6 +687,11 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   settingsModalOpen: false,
   presentationOpen: false,
   isDeploying: false,
+  githubStatus: 'NOT_CONNECTED',
+  githubInstallation: null,
+  githubError: null,
+  githubInstallUrl: null,
+  githubOAuthConfigured: false,
 
   setSnapshot: (snapshot) => {
     useEventStore.getState().setEvents(snapshot.recent_events || []);
@@ -1252,15 +1287,96 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   setRightInspectorCollapsed: (rightInspectorCollapsed) => set({ rightInspectorCollapsed }),
   setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
   setAuthModalOpen: (authModalOpen) => set({ authModalOpen }),
+  clearAuthSession: (openModal = true) => {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('forge_auth_token');
+    }
+    useEventStore.getState().setWsConnected(false);
+    set({
+      authToken: null,
+      currentUser: null,
+      activeWorkspace: null,
+      workforceId: '',
+      authModalOpen: openModal,
+      projectSummary: null,
+      finalReport: null,
+      agents: INITIAL_FALLBACK_AGENTS,
+      tasks: [],
+      meetings: [],
+      activeMeeting: null,
+      activePresentation: null,
+      tokenUsage: null,
+      ceoOverview: null,
+      artifacts: [],
+      executions: [],
+      queueItems: [],
+      connectedRepositories: [],
+      systemCapacity: null,
+      githubStatus: 'NOT_CONNECTED',
+      githubInstallation: null,
+      githubError: null,
+    });
+  },
   setAuthSession: (token, user, workspace) => {
-    localStorage.setItem('forge_auth_token', token);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('forge_auth_token', token);
+    }
     set({
       authToken: token,
       currentUser: user,
       activeWorkspace: workspace,
+      workforceId: '',
       authModalOpen: false,
     });
     void get().fetchSnapshot();
+  },
+  hydrateAuthSession: async () => {
+    const token = get().authToken;
+    if (!token) return false;
+    try {
+      const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+      const activeWsId = get().activeWorkspace?.id;
+      if (activeWsId) headers['X-Workspace-Id'] = activeWsId;
+      const res = await fetch(`${API_BASE_URL}/api/auth/me`, { headers });
+      if (res.status === 401) {
+        get().clearAuthSession(true);
+        return false;
+      }
+      if (!res.ok) return false;
+      const data = await res.json();
+      set({
+        currentUser: data.user || null,
+        activeWorkspace: data.active_workspace || null,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  switchWorkspace: async (workspace) => {
+    const token = get().authToken;
+    if (!token) {
+      get().clearAuthSession(true);
+      return;
+    }
+    set({
+      activeWorkspace: workspace,
+      workforceId: '',
+      tasks: [],
+      executions: [],
+      queueItems: [],
+      artifacts: [],
+      connectedRepositories: [],
+      tokenUsage: null,
+      ceoOverview: null,
+      activeMeeting: null,
+      activePresentation: null,
+      githubStatus: 'NOT_CONNECTED',
+      githubInstallation: null,
+      githubError: null,
+    });
+    await get().hydrateAuthSession();
+    await get().fetchSnapshot();
   },
   logoutSession: async () => {
     const token = get().authToken;
@@ -1270,13 +1386,7 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
         headers: { Authorization: `Bearer ${token}` },
       }).catch(() => {});
     }
-    localStorage.removeItem('forge_auth_token');
-    set({
-      authToken: null,
-      currentUser: null,
-      activeWorkspace: null,
-      authModalOpen: true,
-    });
+    get().clearAuthSession(true);
   },
 
   createArtifact: async (artifactType, title, structuredContent = {}) => {
@@ -1299,22 +1409,223 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
     return art;
   },
 
+  fetchGitHubStatus: async () => {
+    const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/github/status`, { headers });
+      if (!res.ok) return;
+      const data = await res.json();
+      set({
+        githubStatus: data.status === 'CONNECTED' ? 'CONNECTED' : 'NOT_CONNECTED',
+        githubInstallation: data.installation || null,
+        githubInstallUrl: data.install_url || null,
+        githubOAuthConfigured: Boolean(data.oauth_configured),
+        connectedRepositories: data.repositories || get().connectedRepositories,
+        githubError: null,
+      });
+    } catch {
+      // keep existing status on transient network failure
+    }
+  },
+
   connectGitHub: async (accountLogin) => {
     const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
-    await fetch(`${API_BASE_URL}/api/github/connect`, {
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    set({ githubStatus: 'CONNECTING', githubError: null });
+    try {
+      const payload: Record<string, string> = {};
+      if (accountLogin && accountLogin.trim()) {
+        payload.account_login = accountLogin.trim();
+      }
+      const res = await fetch(`${API_BASE_URL}/api/github/connect`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const rawDetail = err.detail;
+        const msg = Array.isArray(rawDetail)
+          ? rawDetail.map((d: { msg?: string }) => d.msg || JSON.stringify(d)).join('; ')
+          : typeof rawDetail === 'string'
+          ? rawDetail
+          : `GitHub App connection failed (${res.status})`;
+        set({ githubStatus: 'ERROR', githubError: msg });
+        useEventStore.getState().setErrorBanner(msg);
+        return { ok: false, error: msg };
+      }
+      const data = await res.json();
+      set({
+        githubStatus: 'CONNECTED',
+        githubInstallation: data.installation || null,
+        connectedRepositories: data.repositories || [],
+        githubError: null,
+      });
+      await get().fetchSnapshot();
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Network error connecting GitHub App';
+      set({ githubStatus: 'ERROR', githubError: msg });
+      useEventStore.getState().setErrorBanner(msg);
+      return { ok: false, error: msg };
+    }
+  },
+
+  startGitHubOAuth: async (mode = 'install') => {
+    if (get().githubStatus === 'CONNECTING') return;
+    const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    set({ githubStatus: 'CONNECTING', githubError: null });
+    try {
+      const redirectUri = `${window.location.origin}/`;
+      const res = await fetch(
+        `${API_BASE_URL}/api/github/oauth/start?redirect_uri=${encodeURIComponent(redirectUri)}`,
+        { headers }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const msg = String(err.detail || `Unable to start GitHub authorization (${res.status})`);
+        set({ githubStatus: 'ERROR', githubError: msg });
+        useEventStore.getState().setErrorBanner(msg);
+        return;
+      }
+      const data = await res.json();
+      const targetUrl =
+        mode === 'oauth'
+          ? data.authorize_url
+          : data.install_authorize_url || data.authorize_url;
+      if (targetUrl) {
+        window.location.href = targetUrl;
+      } else {
+        set({ githubStatus: 'ERROR', githubError: 'GitHub authorization URL was not returned by the server.' });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Network error contacting server to start GitHub authorization.';
+      set({ githubStatus: 'ERROR', githubError: msg });
+      useEventStore.getState().setErrorBanner(msg);
+    }
+  },
+
+  completeGitHubOAuth: async (code, state, installationId) => {
+    const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    set({ githubStatus: 'CONNECTING', githubError: null });
+    try {
+      const body: Record<string, string> = { code, state };
+      if (installationId) body.installation_id = installationId;
+      const res = await fetch(`${API_BASE_URL}/api/github/oauth/exchange`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const rawDetail = err.detail;
+        const msg = Array.isArray(rawDetail)
+          ? rawDetail.map((d: { msg?: string }) => d.msg || JSON.stringify(d)).join('; ')
+          : typeof rawDetail === 'string'
+          ? rawDetail
+          : `GitHub authorization callback failed (${res.status})`;
+        set({ githubStatus: 'ERROR', githubError: msg });
+        useEventStore.getState().setErrorBanner(msg);
+        return { ok: false, error: msg };
+      }
+      const data = await res.json();
+      set({
+        githubStatus: 'CONNECTED',
+        githubInstallation: data.installation || null,
+        connectedRepositories: data.repositories || [],
+        githubError: null,
+      });
+      await get().fetchSnapshot();
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Network error completing GitHub authorization.';
+      set({ githubStatus: 'ERROR', githubError: msg });
+      useEventStore.getState().setErrorBanner(msg);
+      return { ok: false, error: msg };
+    }
+  },
+
+  setGitHubError: (error) => {
+    set({
+      githubStatus: error ? 'ERROR' : 'NOT_CONNECTED',
+      githubError: error,
+    });
+  },
+
+  syncGitHubRepos: async () => {
+    const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    const res = await fetch(`${API_BASE_URL}/api/github/repositories/sync`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ account_login: accountLogin }),
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = String(err.detail || `Repository sync failed (${res.status})`);
+      set({ githubError: msg });
+      useEventStore.getState().setErrorBanner(msg);
+      return;
+    }
+    const repos = await res.json();
+    set({ connectedRepositories: repos, githubError: null });
+  },
+
+  syncRepoPulls: async (repoId) => {
+    const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    const res = await fetch(`${API_BASE_URL}/api/github/repositories/${encodeURIComponent(repoId)}/pulls/sync`, {
+      method: 'POST',
+      headers,
+    });
+    if (res.ok) {
+      await get().fetchSnapshot();
+    }
+  },
+
+  disconnectGitHub: async () => {
+    const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    const res = await fetch(`${API_BASE_URL}/api/github/disconnect`, { method: 'DELETE', headers });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = String(err.detail || `Unable to disconnect GitHub (${res.status})`);
+      set({ githubError: msg });
+      return;
+    }
+    set({ githubStatus: 'NOT_CONNECTED', githubInstallation: null, githubError: null, connectedRepositories: [] });
     await get().fetchSnapshot();
   },
 
-  executeRepoBranch: async (repoId, branchName, filePath = 'src/auth_middleware.py') => {
+  executeRepoBranch: async (repoId, branchName, filePath = 'README.md') => {
     const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
+    if (wsId) headers['X-Workspace-Id'] = wsId;
     const res = await fetch(`${API_BASE_URL}/api/github/repositories/${encodeURIComponent(repoId)}/execute-branch`, {
       method: 'POST',
       headers,
@@ -1326,17 +1637,23 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      useEventStore.getState().setErrorBanner(String(err.detail || `GitHub branch execution failed (${res.status})`));
-      return;
+      const msg = String(err.detail || `GitHub branch execution failed (${res.status})`);
+      set({ githubError: msg });
+      useEventStore.getState().setErrorBanner(msg);
+      return { ok: false, error: msg };
     }
+    set({ githubError: null });
     await get().fetchSnapshot();
+    return { ok: true };
   },
 
   decideApproval: async (executionId, approvalId, decision) => {
     const token = get().authToken;
+    const wsId = get().activeWorkspace?.id;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
-    await fetch(
+    if (wsId) headers['X-Workspace-Id'] = wsId;
+    const res = await fetch(
       `${API_BASE_URL}/api/executions/${encodeURIComponent(executionId)}/approvals/${encodeURIComponent(approvalId)}`,
       {
         method: 'POST',
@@ -1344,7 +1661,17 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
         body: JSON.stringify({ decision }),
       }
     );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = String(err.detail || `Approval / Pull Request action failed (${res.status})`);
+      set({ githubError: msg });
+      useEventStore.getState().setErrorBanner(msg);
+      return { ok: false, error: msg };
+    }
+    const data = await res.json();
+    set({ githubError: null });
     await get().fetchSnapshot();
+    return { ok: true, pullRequest: data.pull_request || null };
   },
 
   cancelExecution: async (executionId) => {
@@ -1360,14 +1687,45 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
 
   updateAdminGovernor: async (config) => {
     const token = get().authToken;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers.Authorization = `Bearer ${token}`;
-    await fetch(`${API_BASE_URL}/api/admin/governor`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(config),
-    });
-    await get().fetchSnapshot();
+    if (!token) {
+      get().clearAuthSession(true);
+      const msg = 'Authentication required (401). Please sign in.';
+      useEventStore.getState().setErrorBanner(msg);
+      return { ok: false, error: msg };
+    }
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      };
+      const activeWsId = get().activeWorkspace?.id;
+      if (activeWsId) headers['X-Workspace-Id'] = activeWsId;
+      const res = await fetch(`${API_BASE_URL}/api/admin/governor`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(config),
+      });
+      if (res.status === 401) {
+        get().clearAuthSession(true);
+        const msg = 'Session expired or unauthorized (401). Please sign in again.';
+        useEventStore.getState().setErrorBanner(msg);
+        return { ok: false, error: msg };
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        const detail = typeof err.detail === 'string' ? err.detail : `Request failed (${res.status})`;
+        const msg = res.status === 403 ? `Access denied (403): ${detail}` : `Governor update failed (${res.status}): ${detail}`;
+        useEventStore.getState().setErrorBanner(msg);
+        return { ok: false, error: msg };
+      }
+      useEventStore.getState().setErrorBanner(null);
+      await get().fetchSnapshot();
+      return { ok: true };
+    } catch (err) {
+      const msg = `Network error updating governor policy: ${String(err)}`;
+      useEventStore.getState().setErrorBanner(msg);
+      return { ok: false, error: msg };
+    }
   },
 
   fetchSnapshot: async (workforceId) => {
@@ -1377,11 +1735,13 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
         return;
       }
       const target = workforceId || get().workforceId;
-      const query = target && target !== 'wf_forge_default' ? `?workforce_id=${encodeURIComponent(target)}` : '';
+      const query = target && target !== 'current' ? `?workforce_id=${encodeURIComponent(target)}` : '';
       const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+      const activeWsId = get().activeWorkspace?.id;
+      if (activeWsId) headers['X-Workspace-Id'] = activeWsId;
       const res = await fetch(`${API_BASE_URL}/api/world/snapshot${query}`, { headers });
       if (res.status === 401) {
-        set({ authModalOpen: true });
+        get().clearAuthSession(true);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

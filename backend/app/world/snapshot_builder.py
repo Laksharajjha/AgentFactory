@@ -55,13 +55,12 @@ class SnapshotBuilder:
     @staticmethod
     async def ensure_default_workforce(
         session: AsyncSession,
-        user_id: str = "usr_director",
-        workspace_id: str = "ws_forge_default",
+        user_id: str,
+        workspace_id: str,
     ) -> WorkforceModel:
+        if not user_id or not workspace_id:
+            raise ValueError("Explicit user_id and workspace_id are required to resolve a workforce.")
         async with _init_lock:
-            if user_id == "usr_director":
-                await AuthService.ensure_default_director_context(session)
-
             res = await session.execute(
                 select(WorkforceModel)
                 .where(WorkforceModel.workspace_id == workspace_id)
@@ -72,23 +71,7 @@ class SnapshotBuilder:
             if wf:
                 return wf
 
-            # Fallback for legacy default workforce before workspace_id backfill
-            if workspace_id == "ws_forge_default":
-                legacy_res = await session.execute(
-                    select(WorkforceModel)
-                    .where(WorkforceModel.workspace_id.is_(None))
-                    .order_by(desc(WorkforceModel.created_at))
-                    .limit(1)
-                )
-                legacy_wf = legacy_res.scalar_one_or_none()
-                if legacy_wf:
-                    legacy_wf.workspace_id = "ws_forge_default"
-                    legacy_wf.tenant_id = "ten_usr_director"
-                    legacy_wf.user_id = legacy_wf.user_id or "usr_director"
-                    await session.commit()
-                    return legacy_wf
-
-            wf_id = "wf_forge_default" if workspace_id == "ws_forge_default" else f"wf_{workspace_id[-10:]}"
+            wf_id = f"wf_{workspace_id[-10:]}"
             wf = WorkforceModel(
                 id=wf_id,
                 user_id=user_id,
@@ -374,7 +357,9 @@ class SnapshotBuilder:
             for r in requests[:20]
         ]
 
-        ws_id = workforce.workspace_id or "ws_forge_default"
+        ws_id = workforce.workspace_id
+        if not ws_id:
+            raise RuntimeError(f"Workforce {workforce.id} is missing workspace_id ownership context.")
         prov_instance = await WorkspaceProviderResolver.resolve_for_workspace(
             session=session,
             workspace_id=ws_id,
@@ -408,9 +393,12 @@ class SnapshotBuilder:
     async def build_world_snapshot(
         session: AsyncSession,
         workforce_id: Optional[str] = None,
-        user_id: str = "usr_director",
-        workspace_id: str = "ws_forge_default",
+        user_id: str = "",
+        workspace_id: str = "",
+        include_global_capacity: bool = False,
     ) -> WorldSnapshotSchema:
+        if not user_id or not workspace_id:
+            raise ValueError("Explicit user_id and workspace_id are required to build a world snapshot.")
         if workforce_id:
             wf_res = await session.execute(
                 select(WorkforceModel).where(WorkforceModel.id == workforce_id)
@@ -605,7 +593,11 @@ class SnapshotBuilder:
         )
         connected_repos = [GitHubService.serialize_repo(r) for r in repo_res.scalars().all()]
 
-        sys_capacity = await CapacityMonitor.get_system_capacity(session)
+        sys_capacity = (
+            await CapacityMonitor.get_system_capacity(session)
+            if include_global_capacity
+            else None
+        )
 
         return WorldSnapshotSchema(
             workforce_id=workforce.id,

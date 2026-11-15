@@ -186,7 +186,7 @@ class AuthService:
         if not ws:
             slug_base = (user.name or "engineer").lower().replace(" ", "-")[:24]
             org_id = f"org_{uuid.uuid4().hex[:10]}"
-            ws_id = f"ws_{uuid.uuid4().hex[:10]}" if user.id != "usr_director" else "ws_forge_default"
+            ws_id = f"ws_{uuid.uuid4().hex[:10]}"
             tenant_id = f"ten_{user.id}"
 
             org = OrganizationModel(
@@ -317,6 +317,7 @@ class AuthService:
             )
 
         await apply_rls_context(session, user.id, ws.id, user.platform_role or "USER")
+        token_data["workspace"]["role"] = ws_role
         return {**token_data, "workspace_role": ws_role}
 
     @staticmethod
@@ -351,6 +352,7 @@ class AuthService:
             )
 
         await apply_rls_context(session, user.id, ws.id, user.platform_role or "USER")
+        token_data["workspace"]["role"] = ws_role
         return {**token_data, "workspace_role": ws_role}
 
     @staticmethod
@@ -447,35 +449,6 @@ class AuthService:
         return True
 
     @staticmethod
-    async def ensure_default_director_context(session: AsyncSession) -> AuthenticatedContext:
-        """Internal system bootstrap helper ONLY for seeding initial default database records during startup."""
-        async with privileged_rls_context(session):
-            res = await session.execute(select(UserModel).where(UserModel.id == "usr_director"))
-            user = res.scalar_one_or_none()
-            if not user:
-                user = UserModel(
-                    id="usr_director",
-                    name="Executive Director",
-                    email="director@projectforge.ai",
-                    password_hash=hash_password("forge-director-2026"),
-                    role="Founder & Principal Architect",
-                    platform_role="PLATFORM_ADMIN",
-                    email_verified=True,
-                    auth_provider="local",
-                    is_active=True,
-                )
-                session.add(user)
-                await session.commit()
-            elif not user.platform_role or user.platform_role == "USER":
-                user.platform_role = "PLATFORM_ADMIN"
-                if not user.email:
-                    user.email = "director@projectforge.ai"
-                await session.commit()
-
-            ws, ws_role = await AuthService.ensure_personal_workspace_for_user(session, user)
-        await apply_rls_context(session, user.id, ws.id, user.platform_role or "PLATFORM_ADMIN")
-        return AuthenticatedContext(user=user, workspace=ws, workspace_role=ws_role)
-
     @staticmethod
     async def verify_token_and_resolve_context(
         session: AsyncSession,

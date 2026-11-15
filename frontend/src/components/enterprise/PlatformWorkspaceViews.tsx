@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Activity,
   CheckCircle2,
@@ -34,11 +34,22 @@ export const PlatformWorkspaceViews: React.FC = () => {
   const queueItems = useWorldStore((s) => s.queueItems);
   const connectedRepositories = useWorldStore((s) => s.connectedRepositories);
   const systemCapacity = useWorldStore((s) => s.systemCapacity);
+  const authToken = useWorldStore((s) => s.authToken);
   const currentUser = useWorldStore((s) => s.currentUser);
   const activeWorkspace = useWorldStore((s) => s.activeWorkspace);
+  const hydrateAuthSession = useWorldStore((s) => s.hydrateAuthSession);
 
   const createArtifact = useWorldStore((s) => s.createArtifact);
-  const connectGitHub = useWorldStore((s) => s.connectGitHub);
+  const githubStatus = useWorldStore((s) => s.githubStatus);
+  const githubInstallation = useWorldStore((s) => s.githubInstallation);
+  const githubError = useWorldStore((s) => s.githubError);
+  const githubInstallUrl = useWorldStore((s) => s.githubInstallUrl);
+  const githubOAuthConfigured = useWorldStore((s) => s.githubOAuthConfigured);
+  const fetchGitHubStatus = useWorldStore((s) => s.fetchGitHubStatus);
+  const startGitHubOAuth = useWorldStore((s) => s.startGitHubOAuth);
+  const syncGitHubRepos = useWorldStore((s) => s.syncGitHubRepos);
+  const syncRepoPulls = useWorldStore((s) => s.syncRepoPulls);
+  const disconnectGitHub = useWorldStore((s) => s.disconnectGitHub);
   const executeRepoBranch = useWorldStore((s) => s.executeRepoBranch);
   const decideApproval = useWorldStore((s) => s.decideApproval);
   const cancelExecution = useWorldStore((s) => s.cancelExecution);
@@ -51,9 +62,12 @@ export const PlatformWorkspaceViews: React.FC = () => {
   const [newArtTitle, setNewArtTitle] = useState('Autonomous Architecture & Security Briefing');
   const [creatingArt, setCreatingArt] = useState(false);
 
-  const [ghAccountInput, setGhAccountInput] = useState('Laksharajjha');
-  const [branchInput, setBranchInput] = useState('forge/zero-trust-middleware');
+  const [selectedRepoId, setSelectedRepoId] = useState<string>('');
+  const [branchInput, setBranchInput] = useState('forge/readme-verification');
+  const [filePathInput, setFilePathInput] = useState('README.md');
   const [runningBranch, setRunningBranch] = useState(false);
+  const [syncingRepos, setSyncingRepos] = useState(false);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
 
   const [govMaxConcurrent, setGovMaxConcurrent] = useState(
     systemCapacity?.max_concurrent_workforces ?? 2
@@ -65,6 +79,45 @@ export const PlatformWorkspaceViews: React.FC = () => {
     systemCapacity?.max_global_queued_workforces ?? 10
   );
   const [govPaused, setGovPaused] = useState(systemCapacity?.admission_paused ?? false);
+  const [govSubmitting, setGovSubmitting] = useState(false);
+  const [govFeedback, setGovFeedback] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const isPlatformAdmin =
+    currentUser?.platform_role === 'PLATFORM_ADMIN' ||
+    currentUser?.platform_role === 'PLATFORM_OPERATOR';
+  const workspaceRole = (activeWorkspace?.role || '').toUpperCase();
+  const workspaceRoleLoading = Boolean(authToken) && !workspaceRole;
+  const canManageGitHub = workspaceRole === 'OWNER' || workspaceRole === 'ADMIN';
+
+  useEffect(() => {
+    setSelectedRepoId('');
+  }, [activeWorkspace?.id]);
+
+  useEffect(() => {
+    if (activeAppSection === 'admin' && !isPlatformAdmin) {
+      setActiveAppSection('office');
+    }
+    if (activeAppSection === 'github') {
+      if (authToken && !activeWorkspace?.role) {
+        void hydrateAuthSession();
+      }
+      void fetchGitHubStatus();
+    }
+  }, [
+    activeAppSection,
+    isPlatformAdmin,
+    setActiveAppSection,
+    fetchGitHubStatus,
+    authToken,
+    activeWorkspace?.role,
+    hydrateAuthSession,
+  ]);
+
+  useEffect(() => {
+    if (connectedRepositories.length > 0 && !connectedRepositories.some((r) => r.id === selectedRepoId)) {
+      setSelectedRepoId(connectedRepositories[0].id);
+    }
+  }, [connectedRepositories, selectedRepoId]);
 
   const handleGenerateArtifact = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -79,7 +132,7 @@ export const PlatformWorkspaceViews: React.FC = () => {
   const handleRunBranchWorkflow = async (repoId: string) => {
     setRunningBranch(true);
     try {
-      await executeRepoBranch(repoId, branchInput);
+      await executeRepoBranch(repoId, branchInput, filePathInput);
     } finally {
       setRunningBranch(false);
     }
@@ -202,69 +255,269 @@ export const PlatformWorkspaceViews: React.FC = () => {
   }
 
   if (activeAppSection === 'github') {
+    const selectedRepo =
+      connectedRepositories.find((r) => r.id === selectedRepoId) || connectedRepositories[0] || null;
+
     return (
       <div className="flex-1 h-full overflow-y-auto bg-[#101216] p-6 text-[#E8EBF0] space-y-6">
-        <div className="flex items-center justify-between border-b border-[#343A45] pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#343A45] pb-4">
           <div>
             <h1 className="text-base font-semibold text-[#E8EBF0] flex items-center gap-2">
               <FolderGit2 className="w-4 h-4 text-[#299B83]" />
-              GitHub App Integration & Isolated Repository Sandboxes
+              GitHub App Integration &amp; Isolated Repository Sandboxes
+              <span
+                className={`px-2 py-0.5 rounded font-mono text-[10px] ${
+                  githubStatus === 'CONNECTED'
+                    ? 'bg-[#299B83]/20 text-[#299B83]'
+                    : githubStatus === 'CONNECTING'
+                    ? 'bg-[#4778D0]/20 text-[#4778D0]'
+                    : githubStatus === 'ERROR'
+                    ? 'bg-[#C45D62]/20 text-[#C45D62]'
+                    : 'bg-[#22262E] text-[#A5ACB8]'
+                }`}
+              >
+                {githubStatus === 'CONNECTED' && githubInstallation
+                  ? `CONNECTED (@${githubInstallation.account_login})`
+                  : githubStatus === 'CONNECTING'
+                  ? 'CONNECTING...'
+                  : githubStatus === 'ERROR'
+                  ? 'CONNECTION FAILED'
+                  : 'NOT CONNECTED'}
+              </span>
             </h1>
             <p className="text-xs text-[#A5ACB8] mt-0.5">
-              Fernet-encrypted short-lived installation tokens. Default branches are protected; all autonomous edits run on isolated working branches with mandatory PR approval gates.
+              Real GitHub App RS256 authentication, Fernet-encrypted installation tokens, real git clone/commit/push, and GitHub REST API Pull Requests.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <input
-              value={ghAccountInput}
-              onChange={(e) => setGhAccountInput(e.target.value)}
-              placeholder="GitHub Owner / Org"
-              className="px-2.5 py-1.5 rounded-md bg-[#151920] border border-[#343A45] text-xs text-[#E8EBF0]"
-            />
-            <button
-              onClick={() => void connectGitHub(ghAccountInput)}
-              className="px-3 py-1.5 rounded-md bg-[#299B83] hover:bg-[#23846f] text-xs font-medium text-[#E8EBF0]"
-            >
-              Connect GitHub App
-            </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {githubStatus === 'CONNECTED' ? (
+              <>
+                {canManageGitHub && (
+                  <button
+                    disabled={syncingRepos}
+                    onClick={async () => {
+                      setSyncingRepos(true);
+                      try {
+                        await syncGitHubRepos();
+                      } finally {
+                        setSyncingRepos(false);
+                      }
+                    }}
+                    className="px-2.5 py-1.5 rounded-md bg-[#22262E] hover:bg-[#2d333f] border border-[#343A45] text-xs text-[#E8EBF0] disabled:opacity-50"
+                  >
+                    {syncingRepos ? 'Syncing...' : 'Refresh Repositories'}
+                  </button>
+                )}
+                {canManageGitHub && (
+                  <button
+                    onClick={() => void disconnectGitHub()}
+                    className="px-2.5 py-1.5 rounded-md bg-[#1B2028] hover:bg-[#C45D62]/20 border border-[#343A45] text-xs text-[#C45D62]"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </>
+            ) : (
+              canManageGitHub && (
+                <button
+                  disabled={githubStatus === 'CONNECTING' || !githubOAuthConfigured}
+                  onClick={() => void startGitHubOAuth('install')}
+                  className="px-3.5 py-1.5 rounded-md bg-[#299B83] hover:bg-[#23846f] disabled:opacity-50 text-xs font-medium text-[#E8EBF0]"
+                >
+                  {githubStatus === 'CONNECTING' ? 'Connecting...' : 'Connect GitHub'}
+                </button>
+              )
+            )}
           </div>
         </div>
 
-        {connectedRepositories.length === 0 ? (
+        {githubError && (
+          <div className="p-3.5 rounded-md bg-[#C45D62]/15 border border-[#C45D62]/40 text-xs text-[#E8EBF0] flex flex-wrap items-center justify-between gap-2">
+            <span>{githubError}</span>
+            {canManageGitHub && (
+              <button
+                disabled={githubStatus === 'CONNECTING'}
+                onClick={() => void startGitHubOAuth('install')}
+                className="px-2.5 py-1 rounded bg-[#22262E] hover:bg-[#2d333f] border border-[#343A45] text-[11px] font-medium text-[#E8EBF0]"
+              >
+                Try Again
+              </button>
+            )}
+          </div>
+        )}
+
+        {githubStatus === 'CONNECTING' && (
+          <div className="p-6 rounded-md bg-[#151920] border border-[#4778D0]/40 text-center space-y-2">
+            <div className="inline-block w-5 h-5 border-2 border-[#4778D0] border-t-transparent rounded-full animate-spin" />
+            <div className="text-sm font-medium text-[#E8EBF0]">Connecting to GitHub...</div>
+            <div className="text-xs text-[#A5ACB8]">
+              Verifying authorization, installation ownership, and discovering accessible repositories.
+            </div>
+          </div>
+        )}
+
+        {githubInstallation && (
+          <div className="p-3 rounded-md bg-[#151920] border border-[#343A45] flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="space-y-0.5">
+              <div className="text-[#E8EBF0] font-medium">
+                Account: <span className="font-mono text-[#299B83]">@{githubInstallation.account_login}</span> ({githubInstallation.account_type}) • Installation #{githubInstallation.installation_id} • {connectedRepositories.length} accessible {connectedRepositories.length === 1 ? 'repository' : 'repositories'}
+              </div>
+              <div className="text-[11px] font-mono text-[#A5ACB8]">
+                Permissions:{' '}
+                {Object.entries(githubInstallation.permissions || {})
+                  .map(([k, v]) => `${k}:${v}`)
+                  .join(' • ') || 'default'}
+              </div>
+            </div>
+            {githubInstallUrl && (
+              <a
+                href={githubInstallUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2.5 py-1 rounded bg-[#22262E] border border-[#343A45] text-[11px] text-[#A5ACB8] hover:text-[#E8EBF0]"
+              >
+                Manage App on GitHub ↗
+              </a>
+            )}
+          </div>
+        )}
+
+        {githubStatus !== 'CONNECTED' && githubStatus !== 'CONNECTING' ? (
+          <div className="p-8 rounded-md bg-[#151920] border border-[#343A45] text-center max-w-xl mx-auto space-y-4">
+            <div className="flex justify-center">
+              <div className="w-12 h-12 rounded-full bg-[#22262E] border border-[#343A45] flex items-center justify-center text-[#E8EBF0]">
+                <svg viewBox="0 0 24 24" className="w-6 h-6 fill-current" aria-label="GitHub logo">
+                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12Z" />
+                </svg>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="text-base font-semibold text-[#E8EBF0]">Connect your GitHub account</h2>
+              <p className="text-xs text-[#A5ACB8] leading-relaxed">
+                Bring your repositories into PROJECT FORGE. Your agents can inspect code, collaborate on changes, and help you ship faster.
+              </p>
+            </div>
+            {workspaceRoleLoading ? (
+              <div className="text-xs text-[#A5ACB8] bg-[#101216] border border-[#343A45] rounded px-3 py-2">
+                Verifying workspace permissions...
+              </div>
+            ) : canManageGitHub ? (
+              <div className="space-y-2.5">
+                <button
+                  disabled={!githubOAuthConfigured}
+                  onClick={() => void startGitHubOAuth('install')}
+                  className="px-5 py-2.5 rounded-md bg-[#299B83] hover:bg-[#23846f] disabled:opacity-50 text-xs font-semibold text-[#E8EBF0]"
+                >
+                  Connect GitHub
+                </button>
+                <div>
+                  <button
+                    disabled={!githubOAuthConfigured}
+                    onClick={() => void startGitHubOAuth('oauth')}
+                    className="text-[11px] text-[#737D8C] hover:text-[#A5ACB8] underline disabled:opacity-50"
+                  >
+                    Already installed the app? Authorize existing installation
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-xs text-[#A5ACB8] bg-[#101216] border border-[#343A45] rounded px-3 py-2">
+                Only workspace OWNER or ADMIN members can connect or manage GitHub integrations.
+              </div>
+            )}
+            <div className="pt-3 border-t border-[#343A45] text-[11px] text-[#737D8C] space-y-1">
+              <div>Requested permissions: Contents (read &amp; write), Pull requests (read &amp; write), Metadata, Checks &amp; Commit statuses (read).</div>
+              <div>Repository access is controlled through GitHub. You choose which accounts and repositories to grant.</div>
+            </div>
+          </div>
+        ) : connectedRepositories.length === 0 ? (
           <div className="p-8 rounded-md bg-[#151920] border border-[#343A45] text-center space-y-3">
             <div className="text-xs text-[#A5ACB8]">
-              No GitHub repositories connected to this workspace yet.
+              Your GitHub account is connected, but no repositories are currently accessible to this installation.
             </div>
-            <button
-              onClick={() => void connectGitHub(ghAccountInput)}
-              className="px-4 py-2 rounded-md bg-[#4778D0] text-xs font-semibold text-[#E8EBF0]"
-            >
-              Authorize & Connect Laksharajjha/AgentFactory
-            </button>
+            <div className="flex items-center justify-center gap-2">
+              {canManageGitHub && (
+                <button
+                  disabled={syncingRepos}
+                  onClick={async () => {
+                    setSyncingRepos(true);
+                    try {
+                      await syncGitHubRepos();
+                    } finally {
+                      setSyncingRepos(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-md bg-[#4778D0] hover:bg-[#3b67b8] disabled:opacity-50 text-xs font-semibold text-[#E8EBF0]"
+                >
+                  {syncingRepos ? 'Refreshing...' : 'Refresh Repositories'}
+                </button>
+              )}
+              {githubInstallUrl && (
+                <a
+                  href={githubInstallUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2 rounded-md bg-[#22262E] border border-[#343A45] text-xs font-medium text-[#E8EBF0]"
+                >
+                  Grant Repository Access on GitHub ↗
+                </a>
+              )}
+            </div>
           </div>
         ) : (
           <div className="space-y-4">
-            {connectedRepositories.map((repo) => (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-mono text-[#A5ACB8]">Select Repository:</span>
+              {connectedRepositories.map((repo) => (
+                <button
+                  key={repo.id}
+                  onClick={() => setSelectedRepoId(repo.id)}
+                  className={`px-3 py-1.5 rounded-md border text-xs font-mono transition ${
+                    selectedRepo?.id === repo.id
+                      ? 'bg-[#4778D0]/20 border-[#4778D0] text-[#E8EBF0]'
+                      : 'bg-[#151920] border-[#343A45] text-[#A5ACB8] hover:text-[#E8EBF0]'
+                  }`}
+                >
+                  {repo.full_name} ({repo.is_private ? 'Private' : 'Public'})
+                </button>
+              ))}
+            </div>
+
+            {selectedRepo && (
               <div
-                key={repo.id}
+                key={selectedRepo.id}
                 className="p-4 rounded-md bg-[#151920] border border-[#343A45] space-y-4"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-[#E8EBF0]">
-                        {repo.full_name}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <a
+                        href={selectedRepo.html_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-semibold text-[#E8EBF0] hover:text-[#4778D0]"
+                      >
+                        {selectedRepo.full_name} ↗
+                      </a>
+                      <span className="px-2 py-0.5 rounded bg-[#22262E] border border-[#343A45] font-mono text-[10px] text-[#A5ACB8]">
+                        default: {selectedRepo.default_branch} (PROTECTED)
                       </span>
                       <span className="px-2 py-0.5 rounded bg-[#22262E] border border-[#343A45] font-mono text-[10px] text-[#A5ACB8]">
-                        default: {repo.default_branch} (PROTECTED)
+                        {selectedRepo.is_private ? 'Private' : 'Public'}
                       </span>
                     </div>
-                    <div className="text-[11px] text-[#737D8C] font-mono mt-0.5">
-                      {repo.clone_url}
+                    <div className="text-[11px] text-[#737D8C] font-mono mt-1">
+                      Branches: {(selectedRepo.repo_metadata?.branches || [selectedRepo.default_branch]).join(', ')}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      value={filePathInput}
+                      onChange={(e) => setFilePathInput(e.target.value)}
+                      placeholder="Target file (e.g. README.md)"
+                      className="px-2.5 py-1 rounded bg-[#101216] border border-[#343A45] text-xs font-mono text-[#E8EBF0] w-36"
+                    />
                     <input
                       value={branchInput}
                       onChange={(e) => setBranchInput(e.target.value)}
@@ -273,41 +526,54 @@ export const PlatformWorkspaceViews: React.FC = () => {
                     />
                     <button
                       disabled={runningBranch}
-                      onClick={() => void handleRunBranchWorkflow(repo.id)}
-                      className="px-3 py-1.5 rounded-md bg-[#4778D0] hover:bg-[#3b67b8] text-xs font-medium text-[#E8EBF0] flex items-center gap-1.5"
+                      onClick={() => void handleRunBranchWorkflow(selectedRepo.id)}
+                      className="px-3 py-1.5 rounded-md bg-[#4778D0] hover:bg-[#3b67b8] disabled:opacity-50 text-xs font-medium text-[#E8EBF0] flex items-center gap-1.5"
                     >
                       <Play className="w-3 h-3" />
                       <span>
                         {runningBranch
-                          ? 'Running Sandbox Tests...'
-                          : 'Execute Isolated Branch & Run Tests'}
+                          ? 'Cloning, Testing & Pushing...'
+                          : 'Clone, Commit & Push Branch'}
                       </span>
+                    </button>
+                    <button
+                      onClick={() => void syncRepoPulls(selectedRepo.id)}
+                      className="px-2.5 py-1.5 rounded-md bg-[#22262E] border border-[#343A45] text-xs text-[#A5ACB8] hover:text-[#E8EBF0]"
+                    >
+                      Sync PRs
                     </button>
                   </div>
                 </div>
 
-                {/* Open Pull Requests */}
-                {(repo.repo_metadata?.open_prs || []).length > 0 && (
+                {/* Open Pull Requests from GitHub */}
+                {(selectedRepo.repo_metadata?.open_prs || []).length > 0 && (
                   <div className="pt-3 border-t border-[#343A45] space-y-2">
                     <div className="text-[11px] font-mono uppercase text-[#A5ACB8] flex items-center gap-1.5">
                       <GitPullRequest className="w-3.5 h-3.5 text-[#299B83]" />
-                      Created Pull Requests (Auto-Merge Disabled)
+                      GitHub Pull Requests (Auto-Merge Disabled)
                     </div>
                     <div className="space-y-1.5">
-                      {(repo.repo_metadata.open_prs || []).map((pr) => (
+                      {(selectedRepo.repo_metadata.open_prs || []).map((pr) => (
                         <div
                           key={pr.number}
-                          className="p-2.5 rounded bg-[#101216] border border-[#343A45] flex items-center justify-between text-xs"
+                          className="p-2.5 rounded bg-[#101216] border border-[#343A45] flex flex-wrap items-center justify-between gap-2 text-xs"
                         >
                           <div>
-                            <span className="font-mono text-[#299B83] mr-2">#{pr.number}</span>
+                            <a
+                              href={pr.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-[#299B83] hover:underline mr-2"
+                            >
+                              #{pr.number} ↗
+                            </a>
                             <span className="font-medium text-[#E8EBF0]">{pr.title}</span>
                             <span className="ml-2 font-mono text-[10px] text-[#737D8C]">
                               ({pr.head} → {pr.base})
                             </span>
                           </div>
                           <span className="px-2 py-0.5 rounded bg-[#299B83]/20 text-[#299B83] font-mono text-[10px]">
-                            {pr.status} • {pr.diff_lines} diff lines
+                            GitHub PR: {pr.status}
                           </span>
                         </div>
                       ))}
@@ -315,7 +581,7 @@ export const PlatformWorkspaceViews: React.FC = () => {
                   </div>
                 )}
               </div>
-            ))}
+            )}
           </div>
         )}
 
@@ -323,13 +589,13 @@ export const PlatformWorkspaceViews: React.FC = () => {
         <div className="space-y-3">
           <h2 className="text-xs font-mono uppercase text-[#A5ACB8] flex items-center gap-1.5">
             <GitBranch className="w-3.5 h-3.5 text-[#D29A43]" />
-            Pending Pull Request Approval Gates & Unified Git Diffs
+            Internal PR Approval Gates &amp; Unified Git Diffs
           </h2>
           {executions.flatMap((ex) =>
             (ex.approvals || []).map((ap) => ({ ex, ap }))
           ).length === 0 ? (
             <div className="p-4 rounded-md bg-[#151920] border border-[#343A45] text-xs text-[#737D8C]">
-              No pending approval gates. Run an isolated branch execution or deploy a workforce to generate a verified diff.
+              No approval gates yet. Run &ldquo;Clone, Commit &amp; Push Branch&rdquo; to generate a real diff and push a working branch.
             </div>
           ) : (
             executions.map((ex) =>
@@ -338,10 +604,13 @@ export const PlatformWorkspaceViews: React.FC = () => {
                   key={ap.id}
                   className="p-4 rounded-md bg-[#151920] border border-[#343A45] space-y-3"
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <div className="text-xs font-semibold text-[#E8EBF0]">{ap.title}</div>
                       <div className="text-[11px] text-[#A5ACB8] mt-0.5">{ap.description}</div>
+                      <div className="text-[10px] font-mono text-[#737D8C] mt-1">
+                        Branch: {ex.working_branch || 'N/A'} • Execution Status: {ex.status}
+                      </div>
                     </div>
                     <span
                       className={`px-2 py-0.5 rounded font-mono text-[10px] ${
@@ -352,7 +621,7 @@ export const PlatformWorkspaceViews: React.FC = () => {
                           : 'bg-[#D29A43]/20 text-[#D29A43]'
                       }`}
                     >
-                      {ap.status}
+                      Internal Gate: {ap.status}
                     </span>
                   </div>
 
@@ -365,13 +634,24 @@ export const PlatformWorkspaceViews: React.FC = () => {
                   {ap.status === 'PENDING' && (
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => void decideApproval(ex.id, ap.id, 'APPROVED')}
-                        className="px-3 py-1.5 rounded bg-[#299B83] hover:bg-[#23846f] text-xs font-medium text-[#E8EBF0] flex items-center gap-1"
+                        disabled={approvingId === ap.id}
+                        onClick={async () => {
+                          setApprovingId(ap.id);
+                          try {
+                            await decideApproval(ex.id, ap.id, 'APPROVED');
+                          } finally {
+                            setApprovingId(null);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded bg-[#299B83] hover:bg-[#23846f] disabled:opacity-50 text-xs font-medium text-[#E8EBF0] flex items-center gap-1"
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>Approve & Create Pull Request</span>
+                        <span>
+                          {approvingId === ap.id ? 'Creating GitHub PR...' : 'Approve & Create GitHub PR'}
+                        </span>
                       </button>
                       <button
+                        disabled={approvingId === ap.id}
                         onClick={() => void decideApproval(ex.id, ap.id, 'REJECTED')}
                         className="px-3 py-1.5 rounded bg-[#1B2028] hover:bg-[#C45D62]/20 border border-[#343A45] text-xs text-[#C45D62] flex items-center gap-1"
                       >
@@ -520,6 +800,29 @@ export const PlatformWorkspaceViews: React.FC = () => {
   }
 
   if (activeAppSection === 'admin') {
+    if (!isPlatformAdmin) {
+      return (
+        <div className="flex-1 h-full overflow-y-auto bg-[#101216] p-6 text-[#E8EBF0] flex items-center justify-center">
+          <div className="max-w-md w-full p-5 rounded-md bg-[#151920] border border-[#C45D62]/60 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-[#C45D62]">
+              <Lock className="w-4 h-4" />
+              Access Denied — Platform Administrator Required
+            </div>
+            <p className="text-xs text-[#A5ACB8]">
+              Your account ({currentUser?.platform_role || 'UNAUTHENTICATED'}) is not authorized to access the Administrator Capacity & Resource Governor Dashboard.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveAppSection('office')}
+              className="px-3 py-1.5 rounded bg-[#22262E] hover:bg-[#2c313c] border border-[#343A45] text-xs font-medium text-[#E8EBF0]"
+            >
+              Return to 3D Office
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex-1 h-full overflow-y-auto bg-[#101216] p-6 text-[#E8EBF0] space-y-6">
         <div className="flex items-center justify-between border-b border-[#343A45] pb-4">
@@ -533,35 +836,37 @@ export const PlatformWorkspaceViews: React.FC = () => {
             </p>
           </div>
           <span className="px-2.5 py-1 rounded bg-[#299B83]/20 border border-[#299B83]/40 font-mono text-[11px] text-[#299B83]">
-            ROLE: {currentUser?.platform_role || 'PLATFORM_ADMIN'}
+            ROLE: {currentUser.platform_role}
           </span>
         </div>
 
         {/* Real-Time Telemetry Cards (Part 18 Specification) */}
         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-3">
           {[
-            { label: 'Authenticated Users', val: systemCapacity?.authenticated_users ?? 1 },
-            { label: 'Active Sessions', val: systemCapacity?.active_sessions ?? 1 },
+            { label: 'Authenticated Users', val: systemCapacity?.authenticated_users ?? '—' },
+            { label: 'Active Sessions', val: systemCapacity?.active_sessions ?? '—' },
             {
               label: 'Active Executions',
-              val: `${systemCapacity?.active_executions ?? 0} / ${
-                systemCapacity?.max_concurrent_workforces ?? 2
-              }`,
+              val: systemCapacity
+                ? `${systemCapacity.active_executions ?? 0} / ${systemCapacity.max_concurrent_workforces ?? '—'}`
+                : '—',
             },
             {
               label: 'Queued Executions',
-              val: `${systemCapacity?.queued_executions ?? 0} (${
-                systemCapacity?.queue_utilization_pct ?? 0
-              }%)`,
+              val: systemCapacity
+                ? `${systemCapacity.queued_executions ?? 0} (${systemCapacity.queue_utilization_pct ?? 0}%)`
+                : '—',
             },
-            { label: 'Available Slots', val: systemCapacity?.available_execution_slots ?? 2 },
-            { label: 'Active Sandboxes', val: systemCapacity?.active_sandboxes ?? 0 },
-            { label: 'API Memory', val: `${systemCapacity?.api_memory_mb ?? 64} MB` },
-            { label: 'API CPU Time', val: `${systemCapacity?.api_cpu_seconds ?? 1.2}s` },
-            { label: 'DB Pool Size', val: systemCapacity?.db_pool_size ?? 5 },
+            { label: 'Available Slots', val: systemCapacity?.available_execution_slots ?? '—' },
+            { label: 'Active Sandboxes', val: systemCapacity?.active_sandboxes ?? '—' },
+            { label: 'API Memory', val: systemCapacity?.api_memory_mb != null ? `${systemCapacity.api_memory_mb} MB` : '—' },
+            { label: 'API CPU Time', val: systemCapacity?.api_cpu_seconds != null ? `${systemCapacity.api_cpu_seconds}s` : '—' },
+            { label: 'DB Pool Size', val: systemCapacity?.db_pool_size ?? '—' },
             {
               label: 'Artifact Storage',
-              val: `${((systemCapacity?.storage_bytes_used ?? 0) / 1024).toFixed(1)} KB`,
+              val: systemCapacity?.storage_bytes_used != null
+                ? `${(systemCapacity.storage_bytes_used / 1024).toFixed(1)} KB`
+                : '—',
             },
           ].map((stat) => (
             <div
@@ -636,18 +941,39 @@ export const PlatformWorkspaceViews: React.FC = () => {
             />
           </label>
 
+          {govFeedback && (
+            <div
+              className={`p-2.5 rounded text-xs border ${
+                govFeedback.ok
+                  ? 'bg-[#299B83]/15 border-[#299B83]/40 text-[#299B83]'
+                  : 'bg-[#C45D62]/15 border-[#C45D62]/50 text-[#E8EBF0]'
+              }`}
+            >
+              {govFeedback.message}
+            </div>
+          )}
+
           <button
-            onClick={() =>
-              void updateAdminGovernor({
+            disabled={govSubmitting}
+            onClick={async () => {
+              setGovSubmitting(true);
+              setGovFeedback(null);
+              const result = await updateAdminGovernor({
                 max_concurrent_workforces: govMaxConcurrent,
                 max_concurrent_executions_per_user: govPerUserExec,
                 max_global_queued_workforces: govGlobalQueue,
                 admission_paused: govPaused,
-              })
-            }
-            className="px-4 py-2 rounded-md bg-[#4778D0] hover:bg-[#3b67b8] text-xs font-semibold text-[#E8EBF0]"
+              });
+              setGovSubmitting(false);
+              setGovFeedback(
+                result.ok
+                  ? { ok: true, message: 'Resource Governor policy updated.' }
+                  : { ok: false, message: result.error || 'Failed to update Resource Governor policy.' }
+              );
+            }}
+            className="px-4 py-2 rounded-md bg-[#4778D0] hover:bg-[#3b67b8] disabled:opacity-50 text-xs font-semibold text-[#E8EBF0]"
           >
-            Apply Governor Policy
+            {govSubmitting ? 'Applying...' : 'Apply Governor Policy'}
           </button>
         </div>
       </div>
@@ -687,10 +1013,10 @@ export const PlatformWorkspaceViews: React.FC = () => {
         <div className="p-4 rounded-md bg-[#151920] border border-[#343A45] space-y-1">
           <div className="text-[10px] font-mono uppercase text-[#737D8C]">Isolated Workspace</div>
           <div className="text-xs font-semibold text-[#E8EBF0]">
-            {activeWorkspace?.name || 'HQ Workspace'}
+            {activeWorkspace?.name || 'No Workspace Selected'}
           </div>
           <div className="text-[11px] font-mono text-[#299B83]">
-            Tenant: {activeWorkspace?.tenant_id || 'ten_usr_director'}
+            Tenant: {activeWorkspace?.tenant_id || '—'}
           </div>
         </div>
 
@@ -770,13 +1096,13 @@ export const PlatformWorkspaceViews: React.FC = () => {
             <div className="p-2.5 rounded bg-[#101216] border border-[#343A45] flex items-center justify-between">
               <span>Authenticated Identity</span>
               <span className="font-mono text-[#E8EBF0]">
-                {currentUser?.email || 'director@projectforge.ai'}
+                {currentUser?.email || 'Not signed in'}
               </span>
             </div>
             <div className="p-2.5 rounded bg-[#101216] border border-[#343A45] flex items-center justify-between">
               <span>Platform Role / Workspace Role</span>
               <span className="font-mono text-[#299B83]">
-                {currentUser?.platform_role || 'PLATFORM_ADMIN'} / OWNER
+                {currentUser ? `${currentUser.platform_role} / OWNER` : 'UNAUTHENTICATED'}
               </span>
             </div>
             <div className="p-2.5 rounded bg-[#101216] border border-[#343A45] flex items-center justify-between">

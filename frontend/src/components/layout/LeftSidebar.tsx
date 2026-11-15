@@ -44,6 +44,10 @@ export const LeftSidebar: React.FC = () => {
   const setIsolatedFloor = useWorldStore((s) => s.setIsolatedFloor);
   const artifacts = useWorldStore((s) => s.artifacts);
   const executions = useWorldStore((s) => s.executions);
+  const currentUser = useWorldStore((s) => s.currentUser);
+  const isPlatformAdmin =
+    currentUser?.platform_role === 'PLATFORM_ADMIN' ||
+    currentUser?.platform_role === 'PLATFORM_OPERATOR';
 
   const { meetings, setSplitViewOpen, setSelectedMeetingId, triggerBoardroomMeeting } =
     useMeeting();
@@ -74,7 +78,9 @@ export const LeftSidebar: React.FC = () => {
       badge: executions.length,
     },
     { id: 'integrations', label: 'Integrations', short: 'Connect', icon: <Plug className="w-4 h-4" /> },
-    { id: 'admin', label: 'Resource Governor', short: 'Admin', icon: <Cpu className="w-4 h-4" /> },
+    ...(isPlatformAdmin
+      ? [{ id: 'admin' as AppSection, label: 'Resource Governor', short: 'Admin', icon: <Cpu className="w-4 h-4" /> }]
+      : []),
   ];
 
   const officeSubTabs: Array<{ id: LeftSidebarTab; label: string; icon: React.ReactNode }> = [

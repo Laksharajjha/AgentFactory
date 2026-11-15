@@ -116,10 +116,6 @@ class RBACGuard:
                     res_ws_id = wf.workspace_id
                     res_user_id = wf.user_id
 
-        # Legacy default workforce before workspace backfill belongs to ws_forge_default / usr_director
-        if res_ws_id is None and res_user_id in (None, "usr_director") and ctx.user_id == "usr_director":
-            return
-
         if res_ws_id and res_ws_id != ctx.workspace_id:
             await AuthService.record_audit(
                 session=session,

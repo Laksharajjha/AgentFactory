@@ -114,9 +114,9 @@ class AgentRuntime:
         workforce_id: str,
         execution_id: Optional[str] = None,
     ) -> None:
-        tenant_id = "ten_usr_director"
-        workspace_id = "ws_forge_default"
-        user_id = "usr_director"
+        tenant_id = ""
+        workspace_id = ""
+        user_id = ""
         resolved_exec_id = execution_id
 
         try:
@@ -129,9 +129,13 @@ class AgentRuntime:
                 if not workforce:
                     return
 
-                tenant_id = workforce.tenant_id or f"ten_{workforce.user_id or 'usr_director'}"
-                workspace_id = workforce.workspace_id or "ws_forge_default"
-                user_id = workforce.user_id or "usr_director"
+                if not workforce.workspace_id or not workforce.user_id:
+                    raise RuntimeError(
+                        f"Workforce {workforce_id} is missing explicit user_id/workspace_id ownership context."
+                    )
+                tenant_id = workforce.tenant_id or f"ten_{workforce.user_id}"
+                workspace_id = workforce.workspace_id
+                user_id = workforce.user_id
                 await apply_rls_context(session, user_id, workspace_id, "USER")
 
                 execution: Optional[ExecutionModel] = None
@@ -621,8 +625,12 @@ class AgentRuntime:
                 )
                 return
 
-            resolved_user_id = user_id or workforce.user_id or "usr_director"
-            resolved_workspace_id = workspace_id or workforce.workspace_id or "ws_forge_default"
+            resolved_user_id = user_id or workforce.user_id
+            resolved_workspace_id = workspace_id or workforce.workspace_id
+            if not resolved_user_id or not resolved_workspace_id:
+                raise RuntimeError(
+                    f"Direct instruction for agent {agent_id} missing explicit user/workspace ownership context."
+                )
 
             await apply_rls_context(
                 session,

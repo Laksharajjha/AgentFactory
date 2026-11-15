@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import { AuthModal } from './components/enterprise/AuthModal';
 import { CommandPalette } from './components/enterprise/CommandPalette';
@@ -26,7 +26,68 @@ export const App: React.FC = () => {
   const errorBanner = useEventStore((s) => s.errorBanner);
   const setErrorBanner = useEventStore((s) => s.setErrorBanner);
   const activeAppSection = useWorldStore((s) => s.activeAppSection);
+  const setActiveAppSection = useWorldStore((s) => s.setActiveAppSection);
+  const authToken = useWorldStore((s) => s.authToken);
+  const activeWorkspace = useWorldStore((s) => s.activeWorkspace);
+  const completeGitHubOAuth = useWorldStore((s) => s.completeGitHubOAuth);
+  const setGitHubError = useWorldStore((s) => s.setGitHubError);
   const { expandedPresentation, setExpandedPresentation } = useMeeting();
+
+  const pendingOAuthRef = useRef<{
+    code?: string;
+    state?: string;
+    installationId?: string | null;
+    error?: string;
+    errorDescription?: string;
+  } | null>(null);
+  const oauthHandledRef = useRef(false);
+
+  // Capture GitHub OAuth callback query params once and strip them from URL immediately
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    const installationId = params.get('installation_id');
+    const oauthError = params.get('error');
+    const oauthErrorDesc = params.get('error_description');
+
+    if (oauthError) {
+      pendingOAuthRef.current = {
+        error: oauthError,
+        errorDescription: oauthErrorDesc || undefined,
+      };
+      setActiveAppSection('github');
+      window.history.replaceState({}, '', '/');
+      return;
+    }
+
+    if (code && state) {
+      pendingOAuthRef.current = { code, state, installationId };
+      setActiveAppSection('github');
+      window.history.replaceState({}, '', '/');
+    }
+  }, [setActiveAppSection]);
+
+  // Complete GitHub OAuth exchange once authToken and activeWorkspace are hydrated
+  useEffect(() => {
+    const pending = pendingOAuthRef.current;
+    if (!pending || oauthHandledRef.current) return;
+
+    if (pending.error) {
+      oauthHandledRef.current = true;
+      const msg =
+        pending.error === 'access_denied'
+          ? 'GitHub authorization was cancelled. Click Connect GitHub whenever you are ready to try again.'
+          : pending.errorDescription || `GitHub authorization failed (${pending.error}).`;
+      setGitHubError(msg);
+      return;
+    }
+
+    if (pending.code && pending.state && authToken && activeWorkspace?.id) {
+      oauthHandledRef.current = true;
+      void completeGitHubOAuth(pending.code, pending.state, pending.installationId);
+    }
+  }, [authToken, activeWorkspace?.id, completeGitHubOAuth, setGitHubError]);
 
   return (
     <div className="flex flex-col w-screen h-screen bg-[#101216] text-[#E8EBF0] overflow-hidden">

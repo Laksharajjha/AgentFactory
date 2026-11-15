@@ -29,20 +29,30 @@ class ExecutionWorkspaceManager:
         self,
         tenant_id: str,
         execution_id: str,
-        repo_full_name: str = "Laksharajjha/AgentFactory",
+        repo_full_name: str = "Laksharajjha/IsoGrid",
         default_branch: str = "main",
         working_branch: Optional[str] = None,
         seed_files: Optional[Dict[str, str]] = None,
+        clone_url: Optional[str] = None,
+        auth_token: Optional[str] = None,
     ) -> Dict[str, Any]:
         safe_tenant = "".join(c if c.isalnum() or c in "_-" else "_" for c in tenant_id)
         safe_exec = "".join(c if c.isalnum() or c in "_-" else "_" for c in execution_id)
         sandbox_dir = (self.root_dir / safe_tenant / safe_exec).resolve()
-        init_info = RepositoryLoader.initialize_sandbox_repo(
-            sandbox_dir=sandbox_dir,
-            repo_full_name=repo_full_name,
-            default_branch=default_branch,
-            seed_files=seed_files,
-        )
+        if clone_url:
+            init_info = RepositoryLoader.clone_repository(
+                sandbox_dir=sandbox_dir,
+                clone_url=clone_url,
+                default_branch=default_branch,
+                auth_token=auth_token,
+            )
+        else:
+            init_info = RepositoryLoader.initialize_sandbox_repo(
+                sandbox_dir=sandbox_dir,
+                repo_full_name=repo_full_name,
+                default_branch=default_branch,
+                seed_files=seed_files,
+            )
         branch = working_branch or f"forge/exec-{safe_exec[-8:]}"
         branch_info = BranchManager.create_working_branch(sandbox_dir, branch)
         self._active_sandboxes[execution_id] = sandbox_dir
@@ -51,6 +61,7 @@ class ExecutionWorkspaceManager:
             "tenant_id": tenant_id,
             "sandbox_path": str(sandbox_dir),
             "base_commit": init_info["base_commit"],
+            "cloned": bool(init_info.get("cloned", False)),
             "working_branch": branch_info["working_branch"],
             "files": FileManager.list_files(sandbox_dir),
         }
@@ -72,24 +83,32 @@ class ExecutionWorkspaceManager:
         if not sandbox_dir.exists():
             return {"exit_code": 1, "success": False, "stdout": "", "stderr": "Sandbox directory does not exist."}
 
-        # Execute Python syntax & unit test verification inside isolated subprocess with stripped environment
         clean_env = {
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
             "PYTHONPATH": str(sandbox_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
-        cmd = [
-            sys.executable,
-            "-c",
-            (
-                "import compileall, pathlib, sys; "
-                "ok = compileall.compile_dir('.', quiet=1); "
-                "from src.auth_middleware import verify_token; "
-                "assert verify_token('valid_token_12345') is True; "
-                "print('SANDBOX_TESTS_PASSED: All syntax and contract assertions succeeded.'); "
-                "sys.exit(0 if ok else 1)"
-            ),
+        py_files = [
+            p for p in sandbox_dir.rglob("*.py") if ".git" not in p.parts
         ]
+        has_pytest_tests = any(
+            p.name.startswith("test_") or p.name.endswith("_test.py")
+            for p in py_files
+        )
+        if has_pytest_tests:
+            cmd = [sys.executable, "-m", "pytest", "-q"]
+            cmd_label = "python -m pytest -q"
+        elif py_files:
+            cmd = [
+                sys.executable,
+                "-c",
+                "import compileall, sys; ok = compileall.compile_dir('.', quiet=1); print('SANDBOX_COMPILEALL_PASSED'); sys.exit(0 if ok else 1)",
+            ]
+            cmd_label = "python -m compileall -q ."
+        else:
+            cmd = ["git", "status", "--short"]
+            cmd_label = "git status --short (no Python test suite detected)"
+
         try:
             proc = subprocess.run(
                 cmd,
@@ -101,7 +120,7 @@ class ExecutionWorkspaceManager:
                 check=False,
             )
             return {
-                "command": "python -m unittest / compileall verification",
+                "command": cmd_label,
                 "exit_code": proc.returncode,
                 "success": proc.returncode == 0,
                 "stdout": proc.stdout.strip(),

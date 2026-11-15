@@ -188,7 +188,7 @@ class ArtifactManager:
                 version=next_ver,
                 filename=filename,
             )
-            file_size, checksum = artifact_storage.put_bytes(storage_key, raw_bytes)
+            file_size, checksum = artifact_storage.put_bytes(storage_key, raw_bytes, content_type=mime)
             art.version = next_ver
             art.storage_key = storage_key
             art.file_size = file_size
@@ -210,7 +210,7 @@ class ArtifactManager:
                 version=1,
                 filename=filename,
             )
-            file_size, checksum = artifact_storage.put_bytes(storage_key, raw_bytes)
+            file_size, checksum = artifact_storage.put_bytes(storage_key, raw_bytes, content_type=mime)
             art = ArtifactModel(
                 id=art_id,
                 tenant_id=tenant_id,

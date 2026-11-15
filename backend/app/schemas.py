@@ -279,16 +279,20 @@ class ArtifactCreateRequest(BaseModel):
 
 
 class GitHubConnectRequest(BaseModel):
-    account_login: str = "Laksharajjha"
+    account_login: Optional[str] = None
     installation_id: Optional[str] = None
-    access_token: Optional[str] = None
-    repositories: Optional[List[Dict[str, Any]]] = None
+
+
+class GitHubOAuthExchangeRequest(BaseModel):
+    state: str
+    code: str
+    installation_id: Optional[str] = None
 
 
 class GitHubBranchActionRequest(BaseModel):
     execution_id: str
     branch_name: str
-    file_path: str = "src/auth_middleware.py"
+    file_path: str = "README.md"
     file_content: Optional[str] = None
     commit_message: str = "feat: autonomous code modification on isolated working branch"
 
